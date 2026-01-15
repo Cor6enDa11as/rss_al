@@ -196,7 +196,8 @@ async def main():
         match, category = matches_category(entry)
         if match:
             if category not in categorized_news:
-                categorized_news[category] = []            categorized_news[category].append(entry)
+                categorized_news[category] = []      
+              categorized_news[category].append(entry)
     
     logger.info(f"Найдено {len(categorized_news)} категорий с новостями")
     
