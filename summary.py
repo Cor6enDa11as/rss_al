@@ -1,5 +1,5 @@
-import requests
 #!/usr/bin/env python3
+import requests
 import hashlib
 import json
 import time
