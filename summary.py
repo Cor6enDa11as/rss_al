@@ -146,8 +146,8 @@ def extract_article_text(url):
 def summarize_with_openrouter(text, model_index=0):
     """Генерация краткой сводки с помощью ИИ"""
     if model_index >= len(FREE_MODELS):
-        logger.error("Все модели исчерпаны")        return None
-        
+        logger.error("Все модели исчерпаны")    
+        return None
     model = FREE_MODELS[model_index]
     
     try:
