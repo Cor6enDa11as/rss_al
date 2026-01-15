@@ -8,6 +8,7 @@ from telegram import Bot
 import openai
 import re
 from bs4 import BeautifulSoup
+import time
 
 # --- КОНФИГУРАЦИЯ ---
 BASE_URL = os.getenv("FRESHRSS_URL")
@@ -43,34 +44,63 @@ FREE_MODELS = [
     "meta-llama/llama-3.1-8b-instruct"
 ]
 
+# Эмодзи для категорий
+CATEGORY_EMOJIS = {
+    "научпоп": "🔬",
+    "технологии": "💻",
+    "политика": "🏛️",    "экономика": "💼"
+}
+
 def get_unread_entries():
-    """Получение непрочитанных статей из FreshRSS"""
+    """Получение непрочитанных статей через Fever API"""
     try:
-        # Аутентификация
-        auth_response = requests.post(f"{BASE_URL}/api/v1/auth", json={
-            'identifier': USER,
+        # Шаг 1: Получаем токен авторизации
+        login_url = f"{BASE_URL}/api/fever.php"
+        
+        login_data = {
+            'api': 'fever',
+            'action': 'login',
+            'email': USER,
             'password': PASS
-        })
-
-        if auth_response.status_code != 201:
-            logger.error(f"Ошибка аутентификации: {auth_response.status_code}")
+        }
+        
+        login_response = requests.post(login_url, data=login_data)
+        
+        if login_response.status_code != 200:
+            logger.error(f"Ошибка аутентификации через Fever API: {login_response.status_code}")
             return []
-
-        token = auth_response.json().get('access_token')
-        headers = {'Authorization': f'Bearer {token}'}
-
-        # Получаем все статьи (или последние N)
-        entries_response = requests.get(f"{BASE_URL}/api/v1/entries", headers=headers)
-
-        if entries_response.status_code == 200:
-            all_entries = entries_response.json().get('items', [])
-            logger.info(f"Получено {len(all_entries)} статей из FreshRSS")
-            return all_entries
-        else:
-            logger.error(f"Ошибка получения статей: {entries_response.status_code}")
+        
+        login_json = login_response.json()
+        token = login_json.get('token')
+        
+        if not token:
+            logger.error("Не удалось получить токен авторизации")
             return []
+        
+        logger.info("Успешная аутентификация через Fever API")
+
+        # Шаг 2: Получаем список непрочитанных статей
+        items_url = f"{BASE_URL}/api/fever.php"
+        items_params = {
+            'api': 'fever',
+            'action': 'items',
+            'token': token,
+            'unread': '1'  # Только непрочитанные
+        }
+        
+        items_response = requests.get(items_url, params=items_params)
+        
+        if items_response.status_code != 200:
+            logger.error(f"Ошибка получения статей: {items_response.status_code}")
+            return []
+        
+        items_json = items_response.json()
+        entries = items_json.get('items', [])
+        
+        logger.info(f"Получено {len(entries)} непрочитанных статей через Fever API")        return entries
+        
     except Exception as e:
-        logger.error(f"Ошибка при получении статей: {e}")
+        logger.error(f"Ошибка при получении статей через Fever API: {e}")
         return []
 
 def matches_category(entry, categories=CATEGORIES):
@@ -78,37 +108,36 @@ def matches_category(entry, categories=CATEGORIES):
     title = entry.get('title', '').lower()
     content = entry.get('content', '').lower()
     feed_title = entry.get('feed', {}).get('title', '').lower()
-
+    
     combined_text = f"{title} {content} {feed_title}"
-
+    
     for category in categories:
         category_lower = category.strip().lower()
         if category_lower in CATEGORY_KEYWORDS:
             keywords = CATEGORY_KEYWORDS[category_lower]
             if any(keyword.lower() in combined_text for keyword in keywords):
-                return True
+                return True, category_lower
         else:
-            # Если категории нет в словаре, ищем просто как текст
             if category_lower in combined_text:
-                return True
-
-    return False
+                return True, category_lower
+    
+    return False, None
 
 def extract_article_text(url):
     """Извлечение текста статьи с помощью BeautifulSoup"""
     try:
         response = requests.get(url)
         soup = BeautifulSoup(response.content, 'html.parser')
-
+        
         # Удаление script и style элементов
         for script in soup(["script", "style"]):
             script.decompose()
-
+        
         text = soup.get_text()
         lines = (line.strip() for line in text.splitlines())
         chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
         text = ' '.join(chunk for chunk in chunks if chunk)
-
+        
         return text[:2000]  # Ограничение длины текста
     except Exception as e:
         logger.error(f"Ошибка извлечения текста из {url}: {e}")
@@ -117,11 +146,10 @@ def extract_article_text(url):
 def summarize_with_openrouter(text, model_index=0):
     """Генерация краткой сводки с помощью ИИ"""
     if model_index >= len(FREE_MODELS):
-        logger.error("Все модели исчерпаны")
-        return None
-
+        logger.error("Все модели исчерпаны")        return None
+        
     model = FREE_MODELS[model_index]
-
+    
     try:
         client = openai.OpenAI(
             api_key=OPENROUTER_KEY,
@@ -138,27 +166,15 @@ def summarize_with_openrouter(text, model_index=0):
             max_tokens=100,
             temperature=0.3
         )
-
+        
         summary = response.choices[0].message.content.strip()
         logger.info(f"Успешно обработана статья с помощью модели {model}")
         return summary
-
+        
     except Exception as e:
         logger.warning(f"Ошибка с моделью {model}: {e}. Пробуем следующую...")
+        time.sleep(1)  # Задержка перед следующей попыткой
         return summarize_with_openrouter(text, model_index + 1)
-
-async def send_to_telegram(message):
-    """Отправка сообщения в Telegram"""
-    try:
-        bot = Bot(token=TELEGRAM_TOKEN)
-        await bot.send_message(
-            chat_id=CHAT_ID,
-            text=message,
-            disable_web_page_preview=True
-        )
-        logger.info(f"Сообщение отправлено в Telegram: {message[:50]}...")
-    except Exception as e:
-        logger.error(f"Ошибка отправки в Telegram: {e}")
 
 def clean_source_name(title):
     """Очистка названия источника для хэштега"""
@@ -167,71 +183,96 @@ def clean_source_name(title):
     cleaned = re.sub(r'\s+', '_', cleaned.strip())
     return cleaned.replace('-', '_')
 
-def get_category_hashtag(title, content, feed_title):
-    """Определение категории для хэштега"""
-    combined_text = f"{title} {content} {feed_title}".lower()
-
-    for category in CATEGORIES:
-        category_lower = category.strip().lower()
-        if category_lower in CATEGORY_KEYWORDS:
-            keywords = CATEGORY_KEYWORDS[category_lower]
-            if any(keyword.lower() in combined_text for keyword in keywords):
-                return category_lower.replace(' ', '_')
-        else:
-            if category_lower in combined_text:
-                return category_lower.replace(' ', '_')
-
-    # Если не нашли, используем первую категорию
-    return CATEGORIES[0].strip().replace(' ', '_')
-
 async def main():
     logger.info(f"Запуск обработки новостей по категориям: {CATEGORIES}")
-
+    
     all_entries = get_unread_entries()
     logger.info(f"Получено {len(all_entries)} статей из FreshRSS")
-
-    # Фильтруем статьи по категориям
-    filtered_entries = [entry for entry in all_entries if matches_category(entry)]
-    logger.info(f"Отфильтровано до {len(filtered_entries)} статей по категориям")
-
-    for entry in filtered_entries:
-        try:
-            article_url = entry.get('alternate', [{}])[0].get('href') or entry.get('url')
+    
+    # Группируем статьи по категориям
+    categorized_news = {}
+    for entry in all_entries:
+        match, category = matches_category(entry)
+        if match:
+            if category not in categorized_news:
+                categorized_news[category] = []            categorized_news[category].append(entry)
+    
+    logger.info(f"Найдено {len(categorized_news)} категорий с новостями")
+    
+    # Формируем сводку по категориям
+    summary_messages = []
+    
+    for category, entries in categorized_news.items():
+        if not entries:
+            continue
+            
+        emoji = CATEGORY_EMOJIS.get(category, "📰")
+        category_display = category.replace('_', ' ').capitalize()
+        
+        # Формируем заголовок категории
+        category_summary = f"{emoji} <b>Новости {category_display}</b>\n\n"
+        
+        # Обрабатываем статьи в категории
+        for entry in entries:
+            article_url = entry.get('url')
             title = entry.get('title', '')
             content = entry.get('content', '')
             feed_title = entry.get('feed', {}).get('title', 'unknown')
-
+            
             if not article_url:
                 continue
-
+                
             logger.info(f"Обработка статьи: {title[:50]}... ({article_url})")
-
+            
             full_text = extract_article_text(article_url)
             if not full_text:
                 logger.warning(f"Не удалось извлечь текст из {article_url}, используем заголовок и содержимое")
                 full_text = f"{title} {content}"
-
+            
             summary = summarize_with_openrouter(full_text)
             if not summary:
                 logger.error(f"Не удалось создать сводку для {article_url}")
                 continue
-
-            # Определяем хэштег категории
-            category_hashtag = get_category_hashtag(title, content, feed_title)
+            
+            # Добавляем новость в сводку
             clean_feed = clean_source_name(feed_title)
-
-            message = f"{summary}\n\n#{category_hashtag} #{clean_feed}"
-
-            await send_to_telegram(message)
-
-            # Маленькая задержка между обработками
-            await asyncio.sleep(1)
-
+            category_summary += f"• {summary}\n  <a href='{article_url}'>#{clean_feed}</a>\n\n"
+            
+            # Задержка между обработками (чтобы не перегружать API)
+            await asyncio.sleep(2)
+        
+        summary_messages.append(category_summary.strip())
+    
+    # Отправляем сводки по категориям
+    bot = Bot(token=TELEGRAM_TOKEN)    
+    for message in summary_messages:
+        try:
+            await bot.send_message(
+                chat_id=CHAT_ID, 
+                text=message, 
+                parse_mode='HTML',
+                disable_web_page_preview=True
+            )
+            logger.info(f"Отправлена сводка по категории")
         except Exception as e:
-            logger.error(f"Ошибка обработки статьи: {e}")
-            continue
-
+            logger.error(f"Ошибка отправки в Telegram: {e}")
+    
+    # Отправляем итоговое сообщение
+    total_news = sum(len(news_list) for news_list in categorized_news.values())
+    summary_footer = f"\n📊 <b>Всего обработано: {total_news} новостей</b>"
+    
+    try:
+        await bot.send_message(
+            chat_id=CHAT_ID, 
+            text=summary_footer, 
+            parse_mode='HTML',
+            disable_web_page_preview=True
+        )
+    except Exception as e:
+        logger.error(f"Ошибка отправки итогового сообщения: {e}")
+    
     logger.info("Обработка завершена")
 
 if __name__ == "__main__":
     asyncio.run(main())
+        
