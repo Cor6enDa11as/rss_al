@@ -2,7 +2,7 @@ name: RSS News Summary
 
 on:
   schedule:
-    - cron: '*/30 * * * *'  # Каждые 30 минут
+    - cron: '0 4,11,17 * * *'
   workflow_dispatch:
 
 jobs:
