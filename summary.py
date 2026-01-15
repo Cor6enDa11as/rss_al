@@ -97,7 +97,8 @@ def get_unread_entries():
         items_json = items_response.json()
         entries = items_json.get('items', [])
         
-        logger.info(f"Получено {len(entries)} непрочитанных статей через Fever API")        return entries
+        logger.info(f"Получено {len(entries)} непрочитанных статей через Fever API")      
+        return entries
         
     except Exception as e:
         logger.error(f"Ошибка при получении статей через Fever API: {e}")
