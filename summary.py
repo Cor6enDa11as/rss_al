@@ -21,7 +21,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 print(f"URL сервера: {BASE_URL}")
 print(f"Пользователь: {USER}")
 
-CATEGORIES = ["Научпоп"]
+CATEGORIES = ["Научпоп", "Компьютерное железо"]
 
 def get_full_text(url):
     try:
