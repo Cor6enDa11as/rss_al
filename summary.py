@@ -2,12 +2,12 @@
 import os
 import asyncio
 import requests
-import trafilatura
 import logging
 from datetime import datetime
 from telegram import Bot
 import openai
 import re
+from bs4 import BeautifulSoup
 
 # --- КОНФИГУРАЦИЯ ---
 BASE_URL = os.getenv("FRESHRSS_URL")
@@ -95,11 +95,21 @@ def matches_category(entry, categories=CATEGORIES):
     return False
 
 def extract_article_text(url):
-    """Извлечение текста статьи"""
+    """Извлечение текста статьи с помощью BeautifulSoup"""
     try:
-        downloaded = trafilatura.fetch_url(url)
-        text = trafilatura.extract(downloaded)
-        return text or ""
+        response = requests.get(url)
+        soup = BeautifulSoup(response.content, 'html.parser')
+
+        # Удаление script и style элементов
+        for script in soup(["script", "style"]):
+            script.decompose()
+
+        text = soup.get_text()
+        lines = (line.strip() for line in text.splitlines())
+        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+        text = ' '.join(chunk for chunk in chunks if chunk)
+
+        return text[:2000]  # Ограничение длины текста
     except Exception as e:
         logger.error(f"Ошибка извлечения текста из {url}: {e}")
         return ""
