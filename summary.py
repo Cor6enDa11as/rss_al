@@ -1,99 +1,227 @@
 #!/usr/bin/env python3
-import requests
-import hashlib
-import json
-import time
 import os
-from bs4 import BeautifulSoup
+import asyncio
+import requests
+import trafilatura
+import logging
+from datetime import datetime
+from telegram import Bot
+import openai
+import re
 
 # --- КОНФИГУРАЦИЯ ---
 BASE_URL = os.getenv("FRESHRSS_URL")
 USER = os.getenv("FRESHRSS_USER")
-FEVER_PASS = os.getenv("FRESHRSS_PASS")
+PASS = os.getenv("FRESHRSS_PASS")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# Просто добавь названия своих папок сюда, и скрипт сам найдет их ID и фиды внутри
-CATEGORIES_TO_WATCH = ["Научпоп", "Технологии", "Компьютерное железо"]
+# Категории для фильтрации (можно настраивать в .env)
+CATEGORIES = os.getenv("NEWS_CATEGORIES", "научпоп,технологии").split(",")
 
-def get_ai_summary(title, url):
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Словарь соответствия ключевых слов категории
+CATEGORY_KEYWORDS = {
+    "научпоп": ["наука", "научпоп", "научный", "исследование", "ученые", "discovery", "science", "research"],
+    "технологии": ["технологии", "tech", "gadget", "гаджеты", "программы", "software", "hardware", "hi-tech"],
+    "политика": ["политика", "политик", "правительство", "election", "government"],
+    "экономика": ["экономика", "финансы", "business", "рынок", "инвестиции"]
+}
+
+# Список бесплатных/доступных моделей
+FREE_MODELS = [
+    "microsoft/wizardlm-2-8x22b",
+    "google/gemma-2-9b-it",
+    "mistralai/mistral-7b-instruct",
+    "meta-llama/llama-3.1-8b-instruct"
+]
+
+def get_unread_entries():
+    """Получение непрочитанных статей из FreshRSS"""
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        r_page = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(r_page.text, 'html.parser')
-        # Очистка текста для ИИ
-        for s in soup(['script', 'style', 'nav', 'header']): s.decompose()
-        text = ' '.join([p.get_text() for p in soup.find_all('p')])[:3000]
+        # Аутентификация
+        auth_response = requests.post(f"{BASE_URL}/api/v1/auth", json={
+            'identifier': USER,
+            'password': PASS
+        })
 
-        prompt = f"Суть новости одним коротким предложением (до 15 слов). Сразу факт. Заголовок: {title}\nТекст: {text}"
-        r_ai = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"},
-            data=json.dumps({"model": "google/gemini-flash-1.5-exp:free", "messages": [{"role": "user", "content": prompt}]}),
-            timeout=25
+        if auth_response.status_code != 201:
+            logger.error(f"Ошибка аутентификации: {auth_response.status_code}")
+            return []
+
+        token = auth_response.json().get('access_token')
+        headers = {'Authorization': f'Bearer {token}'}
+
+        # Получаем все статьи (или последние N)
+        entries_response = requests.get(f"{BASE_URL}/api/v1/entries", headers=headers)
+
+        if entries_response.status_code == 200:
+            all_entries = entries_response.json().get('items', [])
+            logger.info(f"Получено {len(all_entries)} статей из FreshRSS")
+            return all_entries
+        else:
+            logger.error(f"Ошибка получения статей: {entries_response.status_code}")
+            return []
+    except Exception as e:
+        logger.error(f"Ошибка при получении статей: {e}")
+        return []
+
+def matches_category(entry, categories=CATEGORIES):
+    """Проверка соответствия статьи указанным категориям"""
+    title = entry.get('title', '').lower()
+    content = entry.get('content', '').lower()
+    feed_title = entry.get('feed', {}).get('title', '').lower()
+
+    combined_text = f"{title} {content} {feed_title}"
+
+    for category in categories:
+        category_lower = category.strip().lower()
+        if category_lower in CATEGORY_KEYWORDS:
+            keywords = CATEGORY_KEYWORDS[category_lower]
+            if any(keyword.lower() in combined_text for keyword in keywords):
+                return True
+        else:
+            # Если категории нет в словаре, ищем просто как текст
+            if category_lower in combined_text:
+                return True
+
+    return False
+
+def extract_article_text(url):
+    """Извлечение текста статьи"""
+    try:
+        downloaded = trafilatura.fetch_url(url)
+        text = trafilatura.extract(downloaded)
+        return text or ""
+    except Exception as e:
+        logger.error(f"Ошибка извлечения текста из {url}: {e}")
+        return ""
+
+def summarize_with_openrouter(text, model_index=0):
+    """Генерация краткой сводки с помощью ИИ"""
+    if model_index >= len(FREE_MODELS):
+        logger.error("Все модели исчерпаны")
+        return None
+
+    model = FREE_MODELS[model_index]
+
+    try:
+        client = openai.OpenAI(
+            api_key=OPENROUTER_KEY,
+            base_url="https://openrouter.ai/api/v1"
         )
-        return r_ai.json()['choices'][0]['message']['content'].strip().rstrip('.')
-    except: return f"Новость: {title}"
 
-def main():
-    api_key = hashlib.md5(f"{USER}:{FEVER_PASS}".encode()).hexdigest()
-    api_url = f"{BASE_URL}/api/fever.php?api"
+        prompt = f"""Сделай краткое изложение текста одним предложением, описывающим суть новости. Не добавляй заголовок, только суть новости. Текст:\n\n{text}"""
 
-    print("--- ЗАПУСК ОБНОВЛЕННОЙ АВТОМАТИКИ ---")
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=100,
+            temperature=0.3
+        )
 
-    # 1. Получаем ГРУППЫ и СВЯЗИ (отдельными вызовами для надежности)
-    try:
-        g_resp = requests.post(api_url, data={'api_key': api_key, 'groups': ''}).json()
-        f_resp = requests.post(api_url, data={'api_key': api_key, 'feeds': ''}).json()
-        i_resp = requests.post(api_url, data={'api_key': api_key, 'items': '', 'unread_item_ids': ''}).json()
-
-        all_groups = g_resp.get('groups', [])
-        feeds_groups = f_resp.get('feeds_groups', [])
-        all_feeds = {f['id']: f['title'] for f in f_resp.get('feeds', [])}
-        all_items = i_resp.get('items', [])
-        unread_ids = set(i_resp.get('unread_item_ids', '').split(','))
-
-        print(f"Доступно категорий в API: {[g['title'] for g in all_groups]}")
-
-        for target_name in CATEGORIES_TO_WATCH:
-            # Находим ID текущей папки
-            group_id = next((g['id'] for g in all_groups if g['title'] == target_name), None)
-            if not group_id:
-                print(f"! Категория '{target_name}' не найдена во FreshRSS")
-                continue
-
-            # Находим все фиды в этой папке
-            target_feed_ids = []
-            for fg in feeds_groups:
-                # В Fever API group_ids — это строка с ID через запятую
-                if str(group_id) in str(fg.get('group_ids', '')).split(','):
-                    target_feed_ids.append(fg['feed_id'])
-
-            print(f"Категория '{target_name}' (ID: {group_id}) содержит {len(target_feed_ids)} источников")
-
-            # Собираем новости для этой категории
-            to_send = [i for i in all_items if i['feed_id'] in target_feed_ids and str(i['id']) in unread_ids][:10]
-
-            if to_send:
-                msg = f"<b>🤖 {target_name.upper()}:</b>\n\n"
-                for item in to_send:
-                    summary = get_ai_summary(item['title'], item['url'])
-                    source_name = all_feeds.get(item['feed_id'], "news")
-                    tag = "".join(filter(str.isalnum, source_name.lower()))
-                    msg += f"⚡️ {summary}, <a href='{item['url']}'>#{tag}</a>\n\n"
-                    # Маркируем как прочитанное
-                    requests.post(api_url, data={'api_key': api_key, 'mark': 'item', 'as': 'read', 'id': item['id']})
-
-                # Отправка в Telegram
-                requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                              data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML", "disable_web_page_preview": True})
-                print(f"✅ Дайджест '{target_name}' отправлен ({len(to_send)} новостей)")
-            else:
-                print(f"Новых статей в '{target_name}' нет.")
+        summary = response.choices[0].message.content.strip()
+        logger.info(f"Успешно обработана статья с помощью модели {model}")
+        return summary
 
     except Exception as e:
-        print(f"❌ Критическая ошибка: {e}")
+        logger.warning(f"Ошибка с моделью {model}: {e}. Пробуем следующую...")
+        return summarize_with_openrouter(text, model_index + 1)
+
+async def send_to_telegram(message):
+    """Отправка сообщения в Telegram"""
+    try:
+        bot = Bot(token=TELEGRAM_TOKEN)
+        await bot.send_message(
+            chat_id=CHAT_ID,
+            text=message,
+            disable_web_page_preview=True
+        )
+        logger.info(f"Сообщение отправлено в Telegram: {message[:50]}...")
+    except Exception as e:
+        logger.error(f"Ошибка отправки в Telegram: {e}")
+
+def clean_source_name(title):
+    """Очистка названия источника для хэштега"""
+    # Убираем спецсимволы, оставляем только буквы и цифры
+    cleaned = re.sub(r'[^\w\s-]', '', title.lower())
+    cleaned = re.sub(r'\s+', '_', cleaned.strip())
+    return cleaned.replace('-', '_')
+
+def get_category_hashtag(title, content, feed_title):
+    """Определение категории для хэштега"""
+    combined_text = f"{title} {content} {feed_title}".lower()
+
+    for category in CATEGORIES:
+        category_lower = category.strip().lower()
+        if category_lower in CATEGORY_KEYWORDS:
+            keywords = CATEGORY_KEYWORDS[category_lower]
+            if any(keyword.lower() in combined_text for keyword in keywords):
+                return category_lower.replace(' ', '_')
+        else:
+            if category_lower in combined_text:
+                return category_lower.replace(' ', '_')
+
+    # Если не нашли, используем первую категорию
+    return CATEGORIES[0].strip().replace(' ', '_')
+
+async def main():
+    logger.info(f"Запуск обработки новостей по категориям: {CATEGORIES}")
+
+    all_entries = get_unread_entries()
+    logger.info(f"Получено {len(all_entries)} статей из FreshRSS")
+
+    # Фильтруем статьи по категориям
+    filtered_entries = [entry for entry in all_entries if matches_category(entry)]
+    logger.info(f"Отфильтровано до {len(filtered_entries)} статей по категориям")
+
+    for entry in filtered_entries:
+        try:
+            article_url = entry.get('alternate', [{}])[0].get('href') or entry.get('url')
+            title = entry.get('title', '')
+            content = entry.get('content', '')
+            feed_title = entry.get('feed', {}).get('title', 'unknown')
+
+            if not article_url:
+                continue
+
+            logger.info(f"Обработка статьи: {title[:50]}... ({article_url})")
+
+            full_text = extract_article_text(article_url)
+            if not full_text:
+                logger.warning(f"Не удалось извлечь текст из {article_url}, используем заголовок и содержимое")
+                full_text = f"{title} {content}"
+
+            summary = summarize_with_openrouter(full_text)
+            if not summary:
+                logger.error(f"Не удалось создать сводку для {article_url}")
+                continue
+
+            # Определяем хэштег категории
+            category_hashtag = get_category_hashtag(title, content, feed_title)
+            clean_feed = clean_source_name(feed_title)
+
+            message = f"{summary}\n\n#{category_hashtag} #{clean_feed}"
+
+            await send_to_telegram(message)
+
+            # Маленькая задержка между обработками
+            await asyncio.sleep(1)
+
+        except Exception as e:
+            logger.error(f"Ошибка обработки статьи: {e}")
+            continue
+
+    logger.info("Обработка завершена")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
