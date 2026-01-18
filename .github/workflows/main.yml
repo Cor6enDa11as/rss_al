@@ -29,5 +29,6 @@ jobs:
         OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         CHAT_ID: ${{ secrets.CHAT_ID }}
-        NEWS_CATEGORIES: ${{ secrets.NEWS_CATEGORIES }}
+        CATEGORIES_AI: ${{ secrets.CATEGORIES_AI }}
+        CATEGORIES_DIRECT: ${{ secrets.CATEGORIES_DIRECT }}
       run: python summary.py
