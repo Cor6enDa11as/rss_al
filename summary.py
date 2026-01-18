@@ -6,7 +6,7 @@ import time
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 
-# --- КОНФИГУРАЦИЯ ---
+# --- КОНФИГУРАЦИЯ ИЗ SECRETS ---
 BASE_URL = os.getenv("FRESHRSS_URL", "").rstrip('/')
 USER = os.getenv("FRESHRSS_USER")
 PASS = os.getenv("FRESHRSS_PASS")
@@ -14,18 +14,14 @@ OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-CATEGORIES = {
-    "Научпоп": "🔭",
-    "Технологии": "💻",
-    "Компьютерное железо": "⚙️",
-    "Linux": "⚙️",
-}
+# Читаем списки категорий из секретов
+CATEGORIES_AI = [c.strip() for c in os.getenv("CATEGORIES_AI", "").split(",") if c.strip()]
+CATEGORIES_DIRECT = [c.strip() for c in os.getenv("CATEGORIES_DIRECT", "").split(",") if c.strip()]
 
 AI_MODELS = [
     "google/gemini-2.0-flash-001",
     "google/gemini-2.0-flash-exp:free",
-    "qwen/qwen-2.5-72b-instruct",
-    "deepseek/deepseek-chat"
+    "qwen/qwen-2.5-72b-instruct"
 ]
 
 def log(message):
@@ -45,15 +41,9 @@ def get_full_text(url):
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         r = requests.get(url, headers=headers, timeout=12)
         if r.status_code != 200: return ""
-
         soup = BeautifulSoup(r.text, 'html.parser')
         for s in soup(['script', 'style', 'nav', 'header', 'footer', 'aside', 'button', 'form']): s.decompose()
-
-        article = (
-            soup.find('div', {'class': 'tm-article-body'}) or
-            soup.find('div', {'class': 'article-content'}) or
-            soup.find('article') or soup.find('main')
-        )
+        article = (soup.find('div', {'class': 'tm-article-body'}) or soup.find('article') or soup.find('main'))
         text = article.get_text(separator=' ', strip=True) if article else soup.get_text(separator=' ', strip=True)
         return " ".join(text.split())[:5000]
     except: return ""
@@ -61,17 +51,13 @@ def get_full_text(url):
 def get_ai_summary(url, seen_summaries):
     content = get_full_text(url)
     if len(content) < 150: return None
-
     prompt = (
-        "Ты — профессиональный технический редактор. Напиши суть новости ОДНИМ развернутым предложением (до 30 слов) "
-        "на РУССКОМ языке. Отрази ключевой факт. Игнорируй заголовок. "
-        "Если новость дублирует темы: " + ", ".join(list(seen_summaries)[-5:]) + ", ответь только словом ДУБЛИКАТ. "
+        "Напиши суть новости ОДНИМ предложением (до 30 слов) на РУССКОМ языке. Игнорируй заголовок. "
+        "Если это дубликат тем: " + ", ".join(list(seen_summaries)[-5:]) + ", ответь ДУБЛИКАТ. "
         f"\n\nТЕКСТ:\n{content[:4000]}"
     )
-
     for model in AI_MODELS:
         try:
-            log(f"    🤖 Запрос к {model.split('/')[-1]}...")
             r = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"},
@@ -80,68 +66,66 @@ def get_ai_summary(url, seen_summaries):
             )
             if r.status_code == 200:
                 res = r.json()['choices'][0]['message']['content'].strip()
-                if "ДУБЛИКАТ" in res.upper(): return "SKIP"
-                return res.rstrip('.')
+                return "SKIP" if "ДУБЛИКАТ" in res.upper() else res.rstrip('.')
         except: continue
     return None
 
 def extract_hashtag(url):
-    """Вырезает имя домена из ссылки для хэштега"""
     try:
         domain = urlparse(url).netloc.lower()
-        # Убираем www. и поддомены (оставляем только основное имя)
         parts = domain.replace('www.', '').split('.')
-        # Для ixbt.com вернет ixbt, для naked-science.ru вернет nakedscience
         tag = parts[0].replace('-', '')
         return f"#{tag}"
-    except:
-        return "#news"
+    except: return "#news"
+
+def process_category(cat_name, use_ai, token, headers, api_base, global_seen):
+    log(f"--- Категория: {cat_name} (ИИ: {use_ai}) ---")
+    try:
+        r = requests.get(f"{api_base}/stream/contents/user/-/label/{cat_name}",
+                         params={'xt': 'user/-/state/com.google/read', 'n': 10}, headers=headers)
+        items = r.json().get('items', [])
+        if not items: return
+
+        msg_body = f"<b>{cat_name.upper()}:</b>\n\n"
+        count = 0
+
+        for item in items:
+            title = item.get('title', 'Новость')
+            link = item.get('alternate', [{}])[0].get('href', '')
+            tag = extract_hashtag(link)
+
+            if use_ai:
+                summary = get_ai_summary(link, global_seen)
+                if summary == "SKIP": continue
+                text = summary if summary else title
+                msg_body += f"📌 {text} 🔗 <a href='{link}'>{tag}</a>\n\n"
+                global_seen.add(text)
+            else:
+                # Для YouTube и прямых ссылок: заголовок + ссылка-тег
+                msg_body += f"📽 {title} 🔗 <a href='{link}'>{tag}</a>\n\n"
+
+            count += 1
+            requests.post(f"{api_base}/edit-tag", headers=headers, data={'i': item.get('id'), 'a': 'user/-/state/com.google/read'})
+
+        if count > 0:
+            # Для DIRECT категорий ВКЛЮЧАЕМ превью (disable_web_page_preview=False)
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                          data={"chat_id": CHAT_ID, "text": msg_body, "parse_mode": "HTML",
+                                "disable_web_page_preview": use_ai})
+    except Exception as e: log(f"Ошибка в {cat_name}: {e}")
 
 def main():
-    log("=== ЗАПУСК: SMART URL TAGS ===")
     token = get_auth_token()
     if not token: return
-
     headers = {'Authorization': f'GoogleLogin auth={token}'}
     api_base = f"{BASE_URL}/api/greader.php/reader/api/0"
-    global_seen_summaries = set()
+    global_seen = set()
 
-    for cat, emoji in CATEGORIES.items():
-        log(f"\n📂 Категория: {cat}")
-        try:
-            r = requests.get(f"{api_base}/stream/contents/user/-/label/{cat}",
-                             params={'xt': 'user/-/state/com.google/read', 'n': 10}, headers=headers)
-            items = r.json().get('items', [])
+    for cat in CATEGORIES_AI:
+        process_category(cat, True, token, headers, api_base, global_seen)
 
-            if items:
-                msg = f"<b>{emoji} {cat.upper()}:</b>\n\n"
-                count = 0
-                for item in items:
-                    title = item.get('title', '...')
-                    link = item.get('alternate', [{}])[0].get('href', '')
-
-                    log(f"👉 Обработка: {title[:50]}...")
-                    summary = get_ai_summary(link, global_seen_summaries)
-
-                    if summary == "SKIP":
-                        log("    🚫 Дубликат. Пропуск.")
-                    else:
-                        if not summary:
-                            summary = title # Фалбэк на заголовок
-
-                        global_seen_summaries.add(summary)
-                        tag = extract_hashtag(link)
-                        # Формат: 📌 Текст 🔗 #тег
-                        msg += f"📌 {summary} 🔗 <a href='{link}'>{tag}</a>\n\n"
-                        count += 1
-
-                    requests.post(f"{api_base}/edit-tag", headers=headers, data={'i': item.get('id'), 'a': 'user/-/state/com.google/read'})
-
-                if count > 0:
-                    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                                  data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML", "disable_web_page_preview": True})
-            else: log("  Новых новостей нет.")
-        except Exception as e: log(f"  Ошибка: {e}")
+    for cat in CATEGORIES_DIRECT:
+        process_category(cat, False, token, headers, api_base, global_seen)
 
 if __name__ == "__main__":
     main()
