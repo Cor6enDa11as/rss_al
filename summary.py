@@ -98,18 +98,19 @@ def process_category(cat_name, use_ai, token, headers, api_base, global_seen):
                 summary = get_ai_summary(link, global_seen)
                 if summary == "SKIP": continue
                 text = summary if summary else title
-                ai_msg_body += f"📌 {text} 🔗 <a href='{link}'>{tag}</a>\n\n"
+                # Курсив и перенос хэштега на новую строку
+                ai_msg_body += f"📌 <i>{text}</i>\n📌 <a href='{link}'>{tag}</a>\n\n"
                 global_seen.add(text)
                 ai_count += 1
             else:
-                # НАСТРОЙКИ ПРЕВЬЮ ДЛЯ YOUTUBE/DIRECT
+                # Настройки превью для YouTube
                 preview_options = {
                     "url": link,
                     "prefer_large_media": True,
                     "show_above_text": True
                 }
-                # Само сообщение: ссылка скрыта внутри заголовка
-                direct_msg = f"📽 <a href='{link}'><b>{title}</b></a> {tag}"
+                # Без жирного шрифта, с новыми эмодзи 📌
+                direct_msg = f"📌 <a href='{link}'>{title}</a>\n📌<a href='{link}'>{tag}</a>"
 
                 requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                               data={
@@ -122,7 +123,6 @@ def process_category(cat_name, use_ai, token, headers, api_base, global_seen):
             requests.post(f"{api_base}/edit-tag", headers=headers, data={'i': item.get('id'), 'a': 'user/-/state/com.google/read'})
 
         if use_ai and ai_count > 0:
-            # Для сводки ИИ превью отключаем совсем
             ai_preview = {"is_disabled": True}
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                           data={
