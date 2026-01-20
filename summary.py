@@ -20,14 +20,13 @@ CATEGORIES_DIRECT = [c.strip() for c in os.getenv("CATEGORIES_DIRECT", "").split
 
 DB_FILE = "seen_urls.txt"
 
-# Расширенный список моделей (DeepSeek и Qwen часто работают, когда Gemini падает)
+# Список моделей для ротации
 AI_MODELS = [
     "google/gemini-2.0-flash-exp:free",
     "deepseek/deepseek-chat:free",
     "qwen/qwen-2.5-72b-instruct:free",
     "meta-llama/llama-3.3-70b-instruct:free",
     "mistralai/mistral-small-3.1-24b-instruct:free",
-    "microsoft/phi-3-medium-128k-instruct:free",
     "google/gemini-2.0-flash-001"
 ]
 
@@ -41,10 +40,12 @@ def normalize_url(url):
     except: return url
 
 def make_hashtag(text):
+    # Очистка: только буквы (включая ё) и цифры
     clean = re.sub(r'[^a-zA-Zа-яА-ЯёЁ0-9]', '', text)
     return f"#{clean}" if clean else ""
 
 def get_clean_channel_tag(text):
+    # Удаляем YouTube и TelegramChannel из названия
     text = re.sub(r'(?i)\s*(youtube|telegramchannel)\s*$', '', text).strip()
     return make_hashtag(text)
 
@@ -73,12 +74,12 @@ def get_auth_token():
         if r.status_code == 200:
             for line in r.text.split('\n'):
                 if line.startswith('Auth='): return line.replace('Auth=', '').strip()
-    except Exception as e: log(f"❌ Ошибка авторизации FreshRSS: {e}")
+    except Exception as e: log(f"❌ Ошибка FreshRSS: {e}")
     return None
 
 def get_full_text(url):
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        headers = {'User-Agent': 'Mozilla/5.0'}
         r = requests.get(url, headers=headers, timeout=15)
         if r.status_code != 200: return ""
         soup = BeautifulSoup(r.text, 'html.parser')
@@ -87,43 +88,43 @@ def get_full_text(url):
                    soup.find('div', {'class': 'tgme_widget_message_text'}) or
                    soup.find('article') or soup.find('main'))
         text = article.get_text(separator=' ', strip=True) if article else soup.get_text(separator=' ', strip=True)
-        # Берем меньше текста, чтобы экономить токены
-        clean_text = " ".join(text.split())[:3000]
-        return clean_text
-    except Exception as e:
-        log(f"⚠️ Ошибка парсинга {url}: {e}")
-        return ""
+        return " ".join(text.split())[:3500]
+    except: return ""
 
 def get_ai_summary(url):
     content = get_full_text(url)
-    if len(content) < 150: return None
+    if not content or len(content) < 150:
+        log(f"⏩ Пропуск: текст слишком короткий или не найден.")
+        return None
 
-    prompt = "Суть новости ОДНИМ предложением (до 20 слов) на РУССКОМ. Только факты."
+    log(f"🧠 Анализ статьи ({len(content)} симв.): {url[:50]}...")
+    prompt = "Суть новости ОДНИМ коротким предложением (до 20 слов) на русском. Только факты."
 
     for model in AI_MODELS:
         try:
-            log(f"🤖 Модель: {model}...")
+            log(f"🤖 Пробую модель: {model}")
             r = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"},
                 data=json.dumps({
                     "model": model,
                     "messages": [{"role": "user", "content": f"{prompt}\n\n{content}"}],
-                    "temperature": 0.1,
-                    "max_tokens": 100
+                    "temperature": 0.1
                 }),
-                timeout=30
+                timeout=40
             )
+
             if r.status_code == 200:
                 summary = r.json()['choices'][0]['message']['content'].strip().rstrip('.')
-                log(f"✅ Успешно!")
+                log(f"✅ Успех от {model}: {summary[:60]}...")
                 return summary
             elif r.status_code == 429:
-                log(f"⏳ Лимит модели {model}, пробую следующую...")
-                time.sleep(1) # Короткая пауза перед следующей моделью
+                log(f"⚠️ Лимит (429) для {model}. Ищу замену...")
             else:
-                log(f"⚠️ Код {r.status_code}")
-        except: continue
+                log(f"❌ Ошибка {r.status_code} от {model}")
+        except Exception as e:
+            log(f"❗ Сбой модели {model}: {e}")
+            continue
     return None
 
 def send_tg(text, preview=None):
@@ -133,32 +134,35 @@ def send_tg(text, preview=None):
     else: payload["link_preview_options"] = json.dumps({"is_disabled": True})
     try:
         r = requests.post(url, data=payload, timeout=10)
-        return r.status_code == 200
-    except: return False
+        if r.status_code == 200:
+            log("📲 Отправлено в Telegram")
+            return True
+        log(f"❌ TG Error: {r.status_code}")
+    except: log("❌ Ошибка сети при отправке в TG")
+    return False
 
 def process_category(cat_name, use_ai, token, headers, api_base, global_seen_urls):
-    log(f"🚀 КАТЕГОРИЯ: {cat_name.upper()}")
+    log(f"\n--- Категория: {cat_name.upper()} ---")
     try:
         r = requests.get(f"{api_base}/stream/contents/user/-/label/{cat_name}",
                          params={'xt': 'user/-/state/com.google/read', 'n': 40}, headers=headers)
         items = r.json().get('items', [])
-        if not items: return
+        if not items:
+            log(f"📭 Нет новых записей.")
+            return
 
         cat_tag = make_hashtag(cat_name)
         ai_msg_body = f"{cat_tag}\n\n"
         ai_count = 0
 
         for item in items:
-            raw_url = item.get('alternate', [{}])[0].get('href', '')
-            link = normalize_url(raw_url)
+            link = normalize_url(item.get('alternate', [{}])[0].get('href', ''))
             title = item.get('title', 'Новость')
-            source_name = item.get('origin', {}).get('title', 'news')
+            source = item.get('origin', {}).get('title', 'news')
 
             if link in global_seen_urls:
                 requests.post(f"{api_base}/edit-tag", headers=headers, data={'i': item.get('id'), 'a': 'user/-/state/com.google/read'})
                 continue
-
-            log(f"📝 Статья: {title[:40]}...")
 
             if use_ai:
                 summary = get_ai_summary(link)
@@ -166,14 +170,12 @@ def process_category(cat_name, use_ai, token, headers, api_base, global_seen_url
                     tag = get_domain_tag(link)
                     ai_msg_body += f"📌 <i>{summary}</i>\n🏷️ <a href='{link}'>{tag}</a>\n\n"
                     ai_count += 1
-                    time.sleep(2) # ПАУЗА, чтобы не спамить в OpenRouter
-                else:
-                    log("⏩ Не удалось получить сводку")
+                    time.sleep(1.5) # Пауза между запросами к ИИ
             else:
-                tag = get_clean_channel_tag(source_name)
+                tag = get_clean_channel_tag(source)
                 preview = {"url": link, "prefer_large_media": True, "show_above_text": True}
                 direct_msg = f"📌 <a href='{link}'>{title}</a>\n🏷️ <a href='{link}'>{tag}</a>"
-                if send_tg(direct_msg, preview): log("📲 Отправлено")
+                send_tg(direct_msg, preview)
 
             global_seen_urls.add(link)
             requests.post(f"{api_base}/edit-tag", headers=headers, data={'i': item.get('id'), 'a': 'user/-/state/com.google/read'})
@@ -181,16 +183,21 @@ def process_category(cat_name, use_ai, token, headers, api_base, global_seen_url
         if use_ai and ai_count > 0:
             send_tg(ai_msg_body)
 
-    except Exception as e: log(f"❌ Ошибка: {e}")
+    except Exception as e:
+        log(f"❌ Критическая ошибка: {e}")
 
 def main():
+    log("🚀 Старт")
     token = get_auth_token()
     if not token: return
     headers = {'Authorization': f'GoogleLogin auth={token}'}
     api_base = f"{BASE_URL}/api/greader.php/reader/api/0"
     global_seen_urls = load_seen()
+
     for cat in CATEGORIES_AI: process_category(cat, True, token, headers, api_base, global_seen_urls)
     for cat in CATEGORIES_DIRECT: process_category(cat, False, token, headers, api_base, global_seen_urls)
+
     save_seen(global_seen_urls)
+    log("🏁 Финиш")
 
 if __name__ == "__main__": main()
