@@ -36,19 +36,22 @@ def normalize_url(url):
         return urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
     except: return url
 
+def make_hashtag(text):
+    """Очистка текста для превращения в хэштег"""
+    clean = re.sub(r'[^a-zA-Zа-яА-Я0-9]', '', text)
+    return f"#{clean}" if clean else ""
+
+def get_clean_channel_tag(text):
+    """Отрезает YouTube и TelegramChannel и делает чистый хэштег"""
+    text = re.sub(r'(?i)\s*(YouTube|TelegramChannel)$', '', text).strip()
+    return make_hashtag(text)
+
 def get_domain_tag(url):
-    """Хэштег домена (для AI)"""
     try:
         domain = urlparse(url).netloc.lower()
         tag = domain.replace('www.', '').split('.')[0].replace('-', '')
         return f"#{tag}"
     except: return "#news"
-
-def get_clean_channel_tag(text):
-    """Хэштег канала (для Direct)"""
-    text = re.sub(r'(?i)\s*(YouTube|TelegramChannel)$', '', text)
-    clean = re.sub(r'[^a-zA-Zа-яА-Я0-9]', '', text)
-    return f"#{clean}" if clean else "#channel"
 
 def load_seen():
     if os.path.exists(DB_FILE):
@@ -115,10 +118,8 @@ def process_category(cat_name, use_ai, token, headers, api_base, global_seen_url
         items = r.json().get('items', [])
         if not items: return
 
-        # Хэштег категории (например, #Научпоп)
-        cat_hashtag = f"#{cat_name.replace(' ', '')}"
-
-        ai_msg_body = f"{cat_hashtag}\n\n"
+        cat_tag = make_hashtag(cat_name)
+        ai_msg_body = f"{cat_tag}\n\n"
         ai_count = 0
 
         for item in items:
@@ -140,10 +141,10 @@ def process_category(cat_name, use_ai, token, headers, api_base, global_seen_url
                 global_seen_content.add(text)
                 ai_count += 1
             else:
+                # Оставляем только ОДИН тег канала (очищенный)
                 tag = get_clean_channel_tag(source_name)
                 preview = {"url": link, "prefer_large_media": True, "show_above_text": True}
-                # Добавляем хэштег категории в конец Direct-сообщения
-                direct_msg = f"📌 <a href='{link}'>{title}</a>\n🏷️ <a href='{link}'>{tag}</a> {cat_hashtag}"
+                direct_msg = f"📌 <a href='{link}'>{title}</a>\n🏷️ <a href='{link}'>{tag}</a>"
                 requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                               data={"chat_id": CHAT_ID, "text": direct_msg, "parse_mode": "HTML", "link_preview_options": json.dumps(preview)})
 
