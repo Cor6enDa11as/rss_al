@@ -20,7 +20,6 @@ CATEGORIES_DIRECT = [c.strip() for c in os.getenv("CATEGORIES_DIRECT", "").split
 
 DB_FILE = "seen_urls.txt"
 
-# Лучшие бесплатные модели из твоих скриншотов
 AI_MODELS = [
     "google/gemini-2.0-flash-exp:free",
     "meta-llama/llama-3.3-70b-instruct:free",
@@ -37,10 +36,19 @@ def normalize_url(url):
         return urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
     except: return url
 
-def clean_hashtag(text):
-    """Превращает 'PRO Hi-Tech' в '#ProHiTech'"""
+def get_domain_tag(url):
+    """Хэштег домена (для AI)"""
+    try:
+        domain = urlparse(url).netloc.lower()
+        tag = domain.replace('www.', '').split('.')[0].replace('-', '')
+        return f"#{tag}"
+    except: return "#news"
+
+def get_clean_channel_tag(text):
+    """Хэштег канала (для Direct)"""
+    text = re.sub(r'(?i)\s*(YouTube|TelegramChannel)$', '', text)
     clean = re.sub(r'[^a-zA-Zа-яА-Я0-9]', '', text)
-    return f"#{clean}" if clean else "#news"
+    return f"#{clean}" if clean else "#channel"
 
 def load_seen():
     if os.path.exists(DB_FILE):
@@ -79,14 +87,12 @@ def get_full_text(url):
 def get_ai_summary(url, seen_summaries):
     content = get_full_text(url)
     if len(content) < 150: return None
-
     prompt = (
         "Суть новости ОДНИМ предложением (до 25 слов) на РУССКОМ. "
         "Только факты. Если тема совпадает с: " + ", ".join(list(seen_summaries)[-12:]) +
         ", ответь только ДУБЛИКАТ."
         f"\n\nТЕКСТ:\n{content}"
     )
-
     for model in AI_MODELS:
         try:
             r = requests.post(
@@ -109,7 +115,10 @@ def process_category(cat_name, use_ai, token, headers, api_base, global_seen_url
         items = r.json().get('items', [])
         if not items: return
 
-        ai_msg_body = f"<b>{cat_name.upper()}:</b>\n\n"
+        # Хэштег категории (например, #Научпоп)
+        cat_hashtag = f"#{cat_name.replace(' ', '')}"
+
+        ai_msg_body = f"{cat_hashtag}\n\n"
         ai_count = 0
 
         for item in items:
@@ -122,21 +131,19 @@ def process_category(cat_name, use_ai, token, headers, api_base, global_seen_url
                 requests.post(f"{api_base}/edit-tag", headers=headers, data={'i': item.get('id'), 'a': 'user/-/state/com.google/read'})
                 continue
 
-            # Создаем красивый хэштег из названия канала
-            tag = clean_hashtag(source_name)
-
             if use_ai:
                 summary = get_ai_summary(link, global_seen_content)
                 if summary == "SKIP": continue
+                tag = get_domain_tag(link)
                 text = summary if summary else title
-                # ИИ: курсив, новая строка для хэштега с эмодзи 🏷️
-                ai_msg_body += f"📌 <i>{text}</i>\n🔖 <a href='{link}'>{tag}</a>\n\n"
+                ai_msg_body += f"📌 <i>{text}</i>\n🏷️ <a href='{link}'>{tag}</a>\n\n"
                 global_seen_content.add(text)
                 ai_count += 1
             else:
-                # Direct: без жирного, 📌 в начале, 🏷️ перед хэштегом
+                tag = get_clean_channel_tag(source_name)
                 preview = {"url": link, "prefer_large_media": True, "show_above_text": True}
-                direct_msg = f"📌 <a href='{link}'>{title}</a>\n🔖<a href='{link}'>{tag}</a>"
+                # Добавляем хэштег категории в конец Direct-сообщения
+                direct_msg = f"📌 <a href='{link}'>{title}</a>\n🏷️ <a href='{link}'>{tag}</a> {cat_hashtag}"
                 requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                               data={"chat_id": CHAT_ID, "text": direct_msg, "parse_mode": "HTML", "link_preview_options": json.dumps(preview)})
 
