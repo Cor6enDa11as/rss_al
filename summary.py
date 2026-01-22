@@ -20,161 +20,155 @@ CATEGORIES_DIRECT = [c.strip() for c in os.getenv("CATEGORIES_DIRECT", "").split
 
 DB_FILE = "seen_urls.txt"
 
-# Твой список рабочих моделей. 001 — приоритет.
-AI_MODELS = [
-    "google/gemini-2.0-flash-001",
-    "google/gemini-2.0-flash-lite-preview-02-05:free",
-    "qwen/qwen-2.5-7b-instruct:free"
-]
+# Работаем через Gemini 001 как основную
+AI_MODELS = ["google/gemini-2.0-flash-001", "google/gemini-2.0-flash-lite-preview-02-05:free"]
 
 def log(message):
     print(f"[{time.strftime('%H:%M:%S')}] {message}")
-
-def normalize_url(url):
-    try:
-        parsed = urlparse(url)
-        return urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
-    except: return url
 
 def make_hashtag(text):
     clean = re.sub(r'[^a-zA-Zа-яА-ЯёЁ0-9]', '', text)
     return f"#{clean}" if clean else ""
 
 def get_clean_channel_tag(text):
-    """Очистка хэштегов от мусора 'Telegram Channel' и 'YouTube'"""
-    log(f"🔎 [DEBUG] Входное имя: '{text}'")
+    # Убираем дефисы и приписки Telegram Channel / YouTube
     clean_text = re.sub(r'(?i)\s*[-]*\s*(telegram\s*channel|youtube)\s*', '', text).strip()
-    tag = make_hashtag(clean_text)
-    log(f"🏷️ [DEBUG] Очищенный тег: '{tag}'")
-    return tag
+    return make_hashtag(clean_text)
 
-def get_domain_tag(url):
-    try:
-        domain = urlparse(url).netloc.lower()
-        tag = domain.replace('www.', '').split('.')[0].replace('-', '')
-        return f"#{tag}"
-    except: return "#news"
-
-def load_seen():
-    if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r") as f:
-            return set(line.strip() for line in f if line.strip())
-    return set()
-
-def save_seen(seen_set):
-    list_to_save = list(seen_set)[-1000:]
-    with open(DB_FILE, "w") as f:
-        for item in list_to_save: f.write(f"{item}\n")
-
-def get_auth_token():
-    url = f"{BASE_URL}/api/greader.php/accounts/ClientLogin"
-    try:
-        r = requests.get(url, params={'Email': USER, 'Passwd': PASS}, timeout=10)
-        if r.status_code == 200:
-            for line in r.text.split('\n'):
-                if line.startswith('Auth='): return line.replace('Auth=', '').strip()
-    except: return None
+def check_is_video(item, content_text):
+    link = item.get('alternate', [{}])[0].get('href', '').lower()
+    if any(x in link for x in ["youtube.com", "youtu.be"]): return True
+    search_area = (item.get('title', '') + " " + content_text).lower()
+    if any(word in search_area for word in ["видео", "ролик", "🎥", "🎬", "video"]): return True
+    return False
 
 def get_full_text(url):
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         r = requests.get(url, headers=headers, timeout=12)
         soup = BeautifulSoup(r.text, 'html.parser')
-        for s in soup(['script', 'style', 'nav', 'header', 'footer']): s.decompose()
-        article = (soup.find('div', {'class': 'tm-article-body'}) or soup.find('article') or soup.find('main'))
-        text = article.get_text(separator=' ', strip=True) if article else soup.get_text(separator=' ', strip=True)
-        return " ".join(text.split())[:3500]
+        # Ищем текст в Telegram постах и обычных статьях
+        article = (soup.find('div', {'class': 'tgme_widget_message_text'}) or
+                   soup.find('div', {'class': 'tm-article-body'}) or
+                   soup.find('article') or soup.find('main'))
+        if article:
+            return " ".join(article.get_text(separator=' ', strip=True).split())[:3500]
+        return ""
     except: return ""
 
-def get_ai_summary(url):
+def get_ai_summary(url, is_video=False):
     content = get_full_text(url)
-    if not content or len(content) < 150: return None
+    if not content or len(content) < 100: return None
 
-    # --- ОБНОВЛЕННЫЙ ПРОМТ ---
     prompt = (
-        "Сформулируй главную суть новости ОДНИМ информативным предложением (максимум 30 слов) на русском языке. "
-        "Опиши ключевое событие, основных участников и результат, избегая вводных фраз, оценок и приветствий."
+        "Сформулируй суть новости ОДНИМ информативным предложением (до 30 слов) на русском. "
+        "Опиши событие, участников и результат."
     )
-
-    log(f"🧠 Анализ статьи. Промт (30 слов): {prompt}")
+    if is_video:
+        prompt += " В конце предложения обязательно добавь пометку (Видео)."
 
     for model in AI_MODELS:
         try:
-            log(f"🤖 Запрос к {model}...")
             r = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"},
                 data=json.dumps({
                     "model": model,
                     "messages": [{"role": "user", "content": f"{prompt}\n\n{content}"}],
-                    "temperature": 0.1,
-                    "max_tokens": 200
+                    "temperature": 0.1
                 }),
                 timeout=30
             )
             if r.status_code == 200:
-                res = r.json()['choices'][0]['message']['content'].strip().rstrip('.')
-                log(f"✅ Успех от {model}: {res}")
-                return res
-            log(f"⚠️ Ошибка {model}: {r.status_code}")
-        except Exception as e:
-            log(f"❗ Сбой {model}: {e}")
-            continue
+                return r.json()['choices'][0]['message']['content'].strip().rstrip('.')
+        except: continue
     return None
 
-def send_tg(text, preview=None):
+def send_tg(text, preview_enabled=False, link=None):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
-    if preview: payload["link_preview_options"] = json.dumps(preview)
-    else: payload["link_preview_options"] = json.dumps({"is_disabled": True})
-    try: requests.post(url, data=payload, timeout=10)
-    except: pass
+    preview_opts = {"is_disabled": not preview_enabled}
+    if preview_enabled and link:
+        preview_opts.update({"url": link, "prefer_large_media": True, "show_above_text": True})
+
+    payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML", "link_preview_options": json.dumps(preview_opts)}
+    try:
+        requests.post(url, data=payload, timeout=10)
+    except: log("❌ Ошибка отправки в TG")
 
 def process_category(cat_name, use_ai, token, headers, api_base, global_seen_urls):
-    log(f"\n--- {cat_name.upper()} ---")
+    log(f"\n--- КАТЕГОРИЯ: {cat_name.upper()} ---")
     try:
-        r = requests.get(f"{api_base}/stream/contents/user/-/label/{cat_name}",
-                         params={'xt': 'user/-/state/com.google/read', 'n': 40}, headers=headers)
+        r = requests.get(f"{api_base}/stream/contents/user/-/label/{cat_name}", params={'n': 40}, headers=headers)
         items = r.json().get('items', [])
+        if not items: return
 
-        cat_tag = make_hashtag(cat_name)
-        ai_msg_body = f"{cat_tag}\n\n"
+        msg_body_ai = f"{make_hashtag(cat_name)}\n\n"
         ai_count = 0
 
         for item in items:
-            link = normalize_url(item.get('alternate', [{}])[0].get('href', ''))
-            if link in global_seen_urls:
-                requests.post(f"{api_base}/edit-tag", headers=headers, data={'i': item.get('id'), 'a': 'user/-/state/com.google/read'})
-                continue
+            link = item.get('alternate', [{}])[0].get('href', '')
+            if not link or link in global_seen_urls: continue
+
+            source_name = item.get('origin', {}).get('title', 'news')
+            tag = get_clean_channel_tag(source_name)
+
+            # Проверяем наличие видео (в тексте или по ссылке)
+            item_content = item.get('summary', {}).get('content', '')
+            is_video = check_is_video(item, item_content)
 
             if use_ai:
-                summary = get_ai_summary(link)
-                if summary:
-                    domain = get_domain_tag(link)
-                    ai_msg_body += f"📌 <i>{summary}</i>\n🏷️ <a href='{link}'>{domain}</a>\n\n"
-                    ai_count += 1
-                    time.sleep(2)
+                # Группируем Telegram/Новости в одну сводку
+                summary = get_ai_summary(link, is_video)
+                if not summary:
+                    summary = item.get('title', 'Новость')
+                    if is_video: summary += " (Видео)"
+
+                msg_body_ai += f"📌 <i>{summary}</i>\n🏷️ <a href='{link}'>{tag}</a>\n\n"
+                ai_count += 1
+                time.sleep(2)
             else:
-                source = item.get('origin', {}).get('title', 'news')
-                tag = get_clean_channel_tag(source)
-                msg = f"📌 <a href='{link}'>{item.get('title')}</a>\n🏷️ <a href='{link}'>{tag}</a>"
-                send_tg(msg, {"url": link, "show_above_text": True})
+                # Отправляем YouTube (или DIRECT) отдельно с КАРТИНКОЙ
+                title = item.get('title', 'Новость')
+                if is_video: title += " (Видео)"
+                direct_msg = f"📍 <b>{title}</b>\n🏷️ <a href='{link}'>{tag}</a>"
+                send_tg(direct_msg, preview_enabled=True, link=link)
+                log(f"✅ Direct пост: {title[:40]}...")
 
             global_seen_urls.add(link)
             requests.post(f"{api_base}/edit-tag", headers=headers, data={'i': item.get('id'), 'a': 'user/-/state/com.google/read'})
 
         if use_ai and ai_count > 0:
-            send_tg(ai_msg_body)
+            send_tg(msg_body_ai, preview_enabled=False)
+            log(f"✅ AI Сводка отправлена ({ai_count} шт.)")
+
     except Exception as e: log(f"❌ Ошибка: {e}")
 
 def main():
-    token = get_auth_token()
-    if not token: return
-    headers = {'Authorization': f'GoogleLogin auth={token}'}
+    # Авторизация
+    login_url = f"{BASE_URL}/api/greader.php/accounts/ClientLogin?Email={USER}&Passwd={PASS}"
+    r_auth = requests.get(login_url)
+    auth_match = re.search(r'Auth=(.*)', r_auth.text)
+    if not auth_match:
+        log("❌ Ошибка авторизации FreshRSS")
+        return
+
+    headers = {'Authorization': f'GoogleLogin auth={auth_match.group(1).strip()}'}
     api_base = f"{BASE_URL}/api/greader.php/reader/api/0"
-    global_seen_urls = load_seen()
-    for cat in CATEGORIES_AI: process_category(cat, True, token, headers, api_base, global_seen_urls)
-    for cat in CATEGORIES_DIRECT: process_category(cat, False, token, headers, api_base, global_seen_urls)
-    save_seen(global_seen_urls)
+
+    seen = set()
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "r") as f: seen = set(line.strip() for line in f)
+
+    # 1. Сначала обрабатываем AI (сводка)
+    for cat in CATEGORIES_AI:
+        process_category(cat, True, None, headers, api_base, seen)
+
+    # 2. Затем DIRECT (YouTube с превью)
+    for cat in CATEGORIES_DIRECT:
+        process_category(cat, False, None, headers, api_base, seen)
+
+    # Сохраняем базу ссылок
+    with open(DB_FILE, "w") as f:
+        for item in list(seen)[-1000:]: f.write(f"{item}\n")
 
 if __name__ == "__main__": main()
