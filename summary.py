@@ -121,7 +121,7 @@ def process_category(cat_name, use_ai, headers, api_base, global_seen_urls):
                 if is_youtube:
                     direct_msg = f"📍 <b><a href='{link}'>{title}</a></b>\n🏷️ {tag}"
                     log(f"⏳ Пауза 3с для превью YouTube...")
-                    time.sleep(3) # Задержка для лучшего формирования превью
+                    time.sleep(10) # Задержка для лучшего формирования превью
                 else:
                     title_text = f"{title} (Видео)" if is_video else title
                     direct_msg = f"📍 <b><a href='{link}'>{title_text}</a></b>\n🏷️ {tag}"
