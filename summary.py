@@ -19,7 +19,7 @@ CATEGORIES_AI = [c.strip() for c in os.getenv("CATEGORIES_AI", "").split(",") if
 CATEGORIES_DIRECT = [c.strip() for c in os.getenv("CATEGORIES_DIRECT", "").split(",") if c.strip()]
 
 DB_FILE = "seen_urls.txt"
-AI_MODELS = ["google/gemini-2.0-flash-001", "google/gemini-2.0-flash-lite-preview-02-05:free"]
+AI_MODELS = ["google/gemini-2.0-flash-lite-preview-02-05:free", "google/gemini-2.0-flash-001"]
 
 def log(message):
     print(f"[{time.strftime('%H:%M:%S')}] {message}")
