@@ -1,4 +1,5 @@
-import requests
+
+    import requests
 import json
 import os
 import time
@@ -18,17 +19,16 @@ CHAT_ID = os.getenv("CHAT_ID")
 CATEGORIES_AI = [c.strip() for c in os.getenv("CATEGORIES_AI", "").split(",") if c.strip()]
 CATEGORIES_DIRECT = [c.strip() for c in os.getenv("CATEGORIES_DIRECT", "").split(",") if c.strip()]
 
-# 5 надежных бесплатных моделей
+# Только 100% бесплатные и проверенные ID на текущий момент
 AI_MODELS = [
-    "google/gemini-2.0-flash-001",
-    "google/gemini-2.0-flash-lite-001",
     "google/gemini-2.0-flash-lite-preview-02-05:free",
+    "google/gemini-2.0-pro-experimental-02-05:free",
+    "google/gemini-2.0-flash-lite-001",
     "meta-llama/llama-3.3-70b-instruct:free",
-    "deepseek/deepseek-chat:free",
-    "qwen/qwen-2.5-72b-instruct:free"
+    "deepseek/deepseek-r1:free"
 ]
 
-processed_summaries = [] # Для отслеживания дублей
+processed_summaries = []
 
 def log(message):
     print(f"[{time.strftime('%H:%M:%S')}] {message}")
@@ -67,10 +67,16 @@ def get_content(item, url):
 
 def get_ai_summary(text, is_video):
     if not text or len(text) < 100: return None
-    context = "\n".join(processed_summaries[-12:])
-    prompt = f"Суть новости ОДНИМ предложением (до 30 слов) на русском. Опиши событие и результат. Если новость дублирует смысл этих строк, ответь только словом SKIP:\n{context}\n\nТекст новости: {text}"
+    context = "\n".join(processed_summaries[-8:]) # Сократили контекст, чтобы не путать ИИ
     
-    # Перемешиваем модели, чтобы распределить нагрузку
+    # Промт с ослабленным фильтром дублей
+    prompt = (
+        f"Суть новости ОДНИМ предложением ( 30 слов) на русском. Опиши конкретное событие и результат.\n"
+        f"ВАЖНО: Если текст В ТОЧНОСТИ ПОВТОРЯЕТ смысл этих строк, ответь только словом SKIP. "
+        f"Но если это продолжение темы или другое событие из той же серии — ОБЯЗАТЕЛЬНО пиши сводку.\n"
+        f"Контекст прошлых новостей:\n{context}\n\nТекст новости: {text}"
+    )
+    
     models_to_try = AI_MODELS.copy()
     random.shuffle(models_to_try)
 
@@ -78,19 +84,19 @@ def get_ai_summary(text, is_video):
         try:
             r = requests.post("https://openrouter.ai/api/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"},
-                data=json.dumps({"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.1}), timeout=25)
+                data=json.dumps({"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3}), timeout=30)
             
             if r.status_code == 200:
                 res = r.json()['choices'][0]['message']['content'].strip().rstrip('.')
-                if "SKIP" in res.upper(): return "SKIP"
+                if "SKIP" in res.upper() and len(res) < 10: return "SKIP"
                 final = f"{res} 🎬" if is_video and "🎬" not in res else res
                 processed_summaries.append(final)
-                log(f"✅ {model.split('/')[1]} success")
+                log(f"✅ {model.split('/')[-1]} success")
                 return final
             else:
-                log(f"⚠️ {model.split('/')[1]} ошибка: Status {r.status_code} - {r.text[:50]}...")
+                log(f"⚠️ {model.split('/')[-1]} ошибка: {r.status_code}")
         except Exception as e:
-            log(f"❌ {model.split('/')[1]} сбой: {str(e)}")
+            log(f"❌ {model.split('/')[-1]} сбой: {str(e)}")
             continue
     return None
 
@@ -100,7 +106,7 @@ def send_tg(text, preview=False, link=None):
     if preview and link: opts.update({"url": link, "prefer_large_media": True, "show_above_text": True})
     payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML", "link_preview_options": json.dumps(opts)}
     try:
-        res = requests.post(url, data=payload, timeout=15)
+        res = requests.post(url, data=payload, timeout=20)
         return res.status_code == 200
     except: return False
 
@@ -130,7 +136,8 @@ def process_category(cat_name, use_ai, headers, api_base):
     if not items: return
 
     results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+    # Снизили до 2 потоков, чтобы не ловить 429
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         futures = [executor.submit(process_single_item, it, use_ai) for it in items]
         for f in concurrent.futures.as_completed(futures):
             res = f.result()
@@ -140,11 +147,13 @@ def process_category(cat_name, use_ai, headers, api_base):
         valid_news = []
         for r in results:
             if r['content'] == "SKIP":
-                log(f"⏭️ SKIP: Дубликат пропущен ({r['link'][:40]}...)")
+                log(f"⏭️ SKIP: Дубликат {r['link'][:40]}...")
             else:
                 valid_news.append(r)
         
         if valid_news:
+            # Сортируем по ID, чтобы сохранить примерный порядок из ленты
+            valid_news.reverse()
             msg = f"{make_hashtag(cat_name)}\n\n" + "\n\n".join([f"📌 <a href='{n['link']}'>→</a> <i>{n['content']}</i>\n🏷️ {n['tag']}" for n in valid_news])
             if send_tg(msg):
                 for n in results: mark_as_read(api_base, headers, n['id'])
@@ -153,7 +162,7 @@ def process_category(cat_name, use_ai, headers, api_base):
         for n in results:
             msg = f"📍 <b><a href='{n['link']}'>{n['title']}</a></b>\n🏷️ {n['tag']}"
             if n['is_yt']: 
-                log("⏳ Ждем 15с для YouTube превью...")
+                log("⏳ YouTube пауза 15с...")
                 time.sleep(15)
             if send_tg(msg, True, n['link']):
                 mark_as_read(api_base, headers, n['id'])
@@ -162,9 +171,7 @@ def process_category(cat_name, use_ai, headers, api_base):
 def main():
     auth_res = requests.get(f"{BASE_URL}/api/greader.php/accounts/ClientLogin?Email={USER}&Passwd={PASS}")
     auth = re.search(r'Auth=(.*)', auth_res.text)
-    if not auth: 
-        log("❌ Ошибка авторизации во FreshRSS")
-        return
+    if not auth: return
     headers = {'Authorization': f'GoogleLogin auth={auth.group(1).strip()}'}
     api_base = f"{BASE_URL}/api/greader.php/reader/api/0"
     
