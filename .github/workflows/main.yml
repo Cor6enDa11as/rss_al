@@ -2,18 +2,15 @@ name: News Digest Bot
 
 on:
   schedule:
-    - cron: '47 2,6,10,14,18 * * *'
+    - cron: '17 2,6,10,14,18 * * *'
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4 # Обновил до v4
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -34,15 +31,3 @@ jobs:
           CATEGORIES_AI: ${{ secrets.CATEGORIES_AI }}
           CATEGORIES_DIRECT: ${{ secrets.CATEGORIES_DIRECT }}
         run: python summary.py
-
-      - name: Commit and push seen URLs
-        run: |
-          git config --global user.name "GitHub Action Bot"
-          git config --global user.email "actions@github.com"
-          git add seen_urls.txt || true
-          git commit -m "Update seen URLs [skip ci]" || exit 0
-
-          # Забираем изменения из репозитория, чтобы избежать ошибки Rejected
-          git pull --rebase origin main
-
-          git push origin main
