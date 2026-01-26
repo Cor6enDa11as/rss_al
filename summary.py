@@ -3,6 +3,7 @@ import json
 import os
 import time
 import re
+import random
 import concurrent.futures
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
@@ -20,13 +21,14 @@ CATEGORIES_DIRECT = [c.strip() for c in os.getenv("CATEGORIES_DIRECT", "").split
 # 5 надежных бесплатных моделей
 AI_MODELS = [
     "google/gemini-2.0-flash-001",
+    "google/gemini-2.0-flash-lite-001
     "google/gemini-2.0-flash-lite-preview-02-05:free",
     "meta-llama/llama-3.3-70b-instruct:free",
     "deepseek/deepseek-chat:free",
     "qwen/qwen-2.5-72b-instruct:free"
 ]
 
-processed_summaries = [] # Список для отслеживания дублей в текущем запуске
+processed_summaries = [] # Для отслеживания дублей
 
 def log(message):
     print(f"[{time.strftime('%H:%M:%S')}] {message}")
@@ -66,21 +68,30 @@ def get_content(item, url):
 def get_ai_summary(text, is_video):
     if not text or len(text) < 100: return None
     context = "\n".join(processed_summaries[-12:])
-    prompt = f"Суть новости ОДНИМ предложением (до 30 слов) на русском. Опиши событие. Если новость дублирует смысл этих строк, ответь только словом SKIP:\n{context}\n\nТекст новости: {text}"
+    prompt = f"Суть новости ОДНИМ предложением (до 30 слов) на русском. Опиши событие и результат. Если новость дублирует смысл этих строк, ответь только словом SKIP:\n{context}\n\nТекст новости: {text}"
     
-    for model in AI_MODELS:
+    # Перемешиваем модели, чтобы распределить нагрузку
+    models_to_try = AI_MODELS.copy()
+    random.shuffle(models_to_try)
+
+    for model in models_to_try:
         try:
             r = requests.post("https://openrouter.ai/api/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"},
                 data=json.dumps({"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.1}), timeout=25)
+            
             if r.status_code == 200:
                 res = r.json()['choices'][0]['message']['content'].strip().rstrip('.')
                 if "SKIP" in res.upper(): return "SKIP"
                 final = f"{res} 🎬" if is_video and "🎬" not in res else res
                 processed_summaries.append(final)
-                log(f"🤖 {model.split('/')[1]} success")
+                log(f"✅ {model.split('/')[1]} success")
                 return final
-        except: continue
+            else:
+                log(f"⚠️ {model.split('/')[1]} ошибка: Status {r.status_code} - {r.text[:50]}...")
+        except Exception as e:
+            log(f"❌ {model.split('/')[1]} сбой: {str(e)}")
+            continue
     return None
 
 def send_tg(text, preview=False, link=None):
@@ -118,7 +129,6 @@ def process_category(cat_name, use_ai, headers, api_base):
     items = r.json().get('items', [])
     if not items: return
 
-    # Параллельная обработка новостей
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         futures = [executor.submit(process_single_item, it, use_ai) for it in items]
@@ -127,7 +137,13 @@ def process_category(cat_name, use_ai, headers, api_base):
             if res: results.append(res)
 
     if use_ai:
-        valid_news = [r for r in results if r['content'] != "SKIP"]
+        valid_news = []
+        for r in results:
+            if r['content'] == "SKIP":
+                log(f"⏭️ SKIP: Дубликат пропущен ({r['link'][:40]}...)")
+            else:
+                valid_news.append(r)
+        
         if valid_news:
             msg = f"{make_hashtag(cat_name)}\n\n" + "\n\n".join([f"📌 <a href='{n['link']}'>→</a> <i>{n['content']}</i>\n🏷️ {n['tag']}" for n in valid_news])
             if send_tg(msg):
@@ -137,16 +153,18 @@ def process_category(cat_name, use_ai, headers, api_base):
         for n in results:
             msg = f"📍 <b><a href='{n['link']}'>{n['title']}</a></b>\n🏷️ {n['tag']}"
             if n['is_yt']: 
-                log("⏳ Ждем 15с для YouTube...")
+                log("⏳ Ждем 15с для YouTube превью...")
                 time.sleep(15)
             if send_tg(msg, True, n['link']):
                 mark_as_read(api_base, headers, n['id'])
-                log(f"✅ Пост: {n['tag']}")
+                log(f"✅ Пост отправлен: {n['tag']}")
 
 def main():
     auth_res = requests.get(f"{BASE_URL}/api/greader.php/accounts/ClientLogin?Email={USER}&Passwd={PASS}")
     auth = re.search(r'Auth=(.*)', auth_res.text)
-    if not auth: return
+    if not auth: 
+        log("❌ Ошибка авторизации во FreshRSS")
+        return
     headers = {'Authorization': f'GoogleLogin auth={auth.group(1).strip()}'}
     api_base = f"{BASE_URL}/api/greader.php/reader/api/0"
     
