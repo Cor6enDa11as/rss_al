@@ -21,7 +21,7 @@ CATEGORIES_DIRECT = [c.strip() for c in os.getenv("CATEGORIES_DIRECT", "").split
 # 5 надежных бесплатных моделей
 AI_MODELS = [
     "google/gemini-2.0-flash-001",
-    "google/gemini-2.0-flash-lite-001
+    "google/gemini-2.0-flash-lite-001",
     "google/gemini-2.0-flash-lite-preview-02-05:free",
     "meta-llama/llama-3.3-70b-instruct:free",
     "deepseek/deepseek-chat:free",
