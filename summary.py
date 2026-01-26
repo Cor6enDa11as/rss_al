@@ -19,14 +19,14 @@ CATEGORIES_DIRECT = [c.strip() for c in os.getenv("CATEGORIES_DIRECT", "").split
 
 # Список реально бесплатных агентов (Round-robin)
 AI_MODELS = [
-    "google/gemini-2.0-flash-lite-preview-02-05:free",
-    "google/gemini-2.0-pro-experimental-02-05:free",
-    "google/gemini-2.0-flash-001",
-    "google/gemini-2.0-flash-lite-001",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "deepseek/deepseek-r1:free",
-    "qwen/qwen-2.5-72b-instruct:free",
-    "mistralai/mistral-7b-instruct:free"
+    "meta-llama/llama-3.1-405b-instruct:free",
+    "nousresearch/hermes-3-llama-3.1-405b:free",
+    "qwen/qwen-2.5-vl-7b-instruct:free",
+    "meta-llama/llama-3.2-3b-instruct:free",
+    "google/gemma-3-27b-it:free",
+    "mistralai/mistral-small-3.1-24b-instruct:free",
+    "qwen/qwen3-4b:free",
+    "openai/gpt-oss-20b:free"
 ]
 
 model_index = 0
