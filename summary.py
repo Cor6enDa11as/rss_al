@@ -5,7 +5,8 @@ import time
 import re
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
-# Обновленный импорт для новых версий
+from urllib.parse import urlparse # Теперь импорт глобальный 🚀
+
 try:
     from ddgs import DDGS
 except ImportError:
@@ -41,14 +42,11 @@ def get_source_tag(link, feed_title):
 
 def clean_ai_text(text):
     if not text: return ""
-    # Убираем жирный шрифт Markdown (**)
-    text = text.replace("**", "")
-    # Убираем конструкции типа (29 слов), (30 слов) и т.д.
-    text = re.sub(r"\(?\d+\s*слов\)?", "", text, flags=re.IGNORECASE)
+    text = text.replace("**", "") # Убираем жирный шрифт
+    text = re.sub(r"\(?\d+\s*слов\)?", "", text, flags=re.IGNORECASE) # Убираем счетчик слов
     return text.strip()
 
 def call_ai(api_name, text):
-    # Более строгий промпт
     prompt = f"Сделай краткое резюме ОДНИМ предложением (до 30 слов) на русском. Не используй Markdown и не пиши количество слов в ответе. Статья: {text[:3500]}"
     try:
         res = None
@@ -71,26 +69,29 @@ def call_ai(api_name, text):
             if r.status_code == 200: res = r.json().get('text')
         elif api_name == "hf" and KEYS["hf"]:
             API_URL = "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-72B-Instruct"
-            # Добавили wait_for_model: True
             r = requests.post(API_URL, headers={"Authorization": f"Bearer {KEYS['hf']}"},
                 json={"inputs": f"User: {prompt}\nAssistant:", "parameters": {"max_new_tokens": 100}, "options": {"wait_for_model": True}}, timeout=40)
             if r.status_code == 200:
                 out = r.json()
                 res = out[0].get('generated_text', '').split("Assistant:")[-1] if isinstance(out, list) else out.get('generated_text', '')
 
-        if res:
-            return clean_ai_text(res)
+        if res: return clean_ai_text(res)
     except Exception as e:
         log(f"❌ [{api_name.upper()}] Ошибка: {str(e)[:50]}")
     return None
 
+def clean_html(raw_html):
+    if not raw_html: return "", False
+    soup = BeautifulSoup(raw_html, "html.parser")
+    has_video = bool(soup.find(['video', 'iframe', 'embed'])) or ".mp4" in raw_html.lower()
+    for s in soup(["script", "style"]): s.decompose()
+    text = " ".join(soup.get_text(separator=' ').split())
+    return text, has_video
+
 def process_item(item, api_name, is_ai):
-    from urllib.parse import urlparse
     link = item.get('alternate', [{}])[0].get('href', '')
     feed_title = item.get('origin', {}).get('title', 'Source')
     raw_html = item.get('summary', {}).get('content') or item.get('content', {}).get('content') or ""
-    
-    source_tag = get_source_tag(link, feed_title)
     
     if "t.me" in link:
         text, has_v = clean_html(raw_html)
@@ -100,26 +101,20 @@ def process_item(item, api_name, is_ai):
             text, has_v = clean_html(r.text)
         except: text, has_v = clean_html(raw_html)
 
+    source_tag = get_source_tag(link, feed_title)
     video_marker = "🎬 " if (has_v or "youtube" in link.lower() or "youtu.be" in link.lower()) else ""
     
     if is_ai:
         summary = call_ai(api_name, text) if len(text) > 100 else None
         content = summary if summary else item.get('title')
-        # Перенос хэштега на новую строку
         line = f"📌 <a href='{link}'>→</a> {content}\n{video_marker}🏷️ {source_tag}"
     else:
-        # Для YouTube (Direct) - превью будет включено, заголовок - ссылка
         line = f"📌 <a href='{link}'>{item.get('title')}</a>\n{video_marker}🏷️ {source_tag}"
 
     return {"id": item.get('id'), "line": line}
 
-def clean_html(raw_html):
-    if not raw_html: return "", False
-    soup = BeautifulSoup(raw_html, "html.parser")
-    has_video = bool(soup.find(['video', 'iframe', 'embed'])) or ".mp4" in raw_html.lower()
-    for s in soup(["script", "style"]): s.decompose()
-    text = " ".join(soup.get_text(separator=' ').split())
-    return text, has_video
+def api_worker(items_chunk, api_name, is_ai):
+    return [process_item(it, api_name, is_ai) for it in items_chunk]
 
 def send_tg(text, disable_preview):
     allowed = ['a', 'b', 'i', 'strong', 'em']
@@ -175,9 +170,6 @@ def process_category(cat_name, use_ai, headers, api_base):
         if items_to_mark and send_tg(msg.strip(), disable_preview=use_ai):
             mark_as_read(items_to_mark, headers, api_base)
 
-def api_worker(items_chunk, api_name, is_ai):
-    return [process_item(it, api_name, is_ai) for it in items_chunk]
-
 def main():
     log("🏁 ЗАПУСК")
     auth_res = requests.get(f"{BASE_URL}/api/greader.php/accounts/ClientLogin?Email={USER}&Passwd={PASS}")
@@ -191,3 +183,5 @@ def main():
     log("✅ ЗАВЕРШЕНО")
 
 if __name__ == "__main__": main()
+
+    
