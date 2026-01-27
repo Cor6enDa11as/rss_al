@@ -35,7 +35,7 @@ def clean_ai_text(text):
     return text.strip()
 
 def call_ai(api_name, text):
-    prompt = f"Сделай краткое резюме ОДНИМ предложением (до 30 слов) на русском. Не используй Markdown. Статья: {text[:3800]}"
+    prompt = f"Сформулируй главную новость текста одним ёмким предложением на русском языке (30 слов). Передай конкретный результат или ключевое событие, избегая общих фраз. Запрещено: использовать Markdown (), писать количество слов в скобках и начинать с вводных оборотов вроде 'Статья рассказывает...','Автор пишет...'. Только чистый, плотный текст.Статья: {text[:3800]}"
     try:
         res = None
         if api_name == "groq" and KEYS["groq"]:
@@ -116,10 +116,10 @@ def process_item(item, api_name, is_ai):
     if is_ai:
         summary = call_ai(api_name, full_text)
         content = summary if summary else item.get('title')
-        line = f"📌 <a href='{link}'>→</a> {content}\n{video_marker}🏷️ {source_tag}"
+        line = f"📌 <a href='{link}'>→</a> {content} {video_marker}\n🏷️ {source_tag}"
     else:
         # Прямая ссылка для YouTube/Direct
-        line = f"📌 <a href='{link}'>{item.get('title')}</a>\n{video_marker}🏷️ {source_tag}"
+        line = f"📌 <a href='{link}'>{item.get('title')}</a>\n🏷️ {source_tag}"
 
     return {"id": item.get('id'), "line": line}
 
