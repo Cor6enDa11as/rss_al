@@ -2,13 +2,14 @@ name: News Digest Bot
 
 on:
   schedule:
-    # Запуск 5 раз в день
+    # Твое расписание: запуск 5 раз в день
     - cron: '17 2,6,10,14,18 * * *'
-  workflow_dispatch: 
+  workflow_dispatch: # Оставляем ручной запуск для тестов 🚀
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -30,16 +31,14 @@ jobs:
           FRESHRSS_USER: ${{ secrets.FRESHRSS_USER }}
           FRESHRSS_PASS: ${{ secrets.FRESHRSS_PASS }}
 
-          # API Keys
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
-          COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-
           # Telegram
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
+
+          # API Keys (Только рабочая "Тройка" 🏆)
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
 
           # Categories
           CATEGORIES_AI: ${{ secrets.CATEGORIES_AI }}
