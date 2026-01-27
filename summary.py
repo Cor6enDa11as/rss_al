@@ -45,20 +45,41 @@ def clean_html(raw_html):
     return text, has_video
 
 def call_ai(api_name, text):
+    char_count = len(text)
     prompt = f"Сделай краткое резюме ОДНИМ предложением (до 30 слов) на русском: {text[:3500]}"
     try:
+        start_time = time.time()
+        res = None
+        
         if api_name == "gemini":
             with DDGS() as ddgs:
-                # Исправленный вызов для версии 7.0+
                 res = ddgs.chat(prompt, model='gpt-4o-mini')
-                return res.strip() if res else None
-        # ... остальные API (Groq, Mistral, Cohere, HF) остаются как в прошлом коде
         elif api_name == "groq" and KEYS["groq"]:
             r = requests.post("https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {KEYS['groq']}"},
                 json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}]}, timeout=25)
-            return r.json()['choices'][0]['message']['content'].strip()
-        # (Аналогично для Mistral, Cohere и HF из предыдущего скрипта)
+            if r.status_code == 200: res = r.json()['choices'][0]['message']['content']
+        elif api_name == "mistral" and KEYS["mistral"]:
+            r = requests.post("https://api.mistral.ai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {KEYS['mistral']}"},
+                json={"model": "mistral-small-latest", "messages": [{"role": "user", "content": prompt}]}, timeout=25)
+            if r.status_code == 200: res = r.json()['choices'][0]['message']['content']
+        elif api_name == "cohere" and KEYS["cohere"]:
+            r = requests.post("https://api.cohere.ai/v1/chat", headers={"Authorization": f"Bearer {KEYS['cohere']}"},
+                json={"message": prompt, "model": "command-r-08-2024"}, timeout=25)
+            if r.status_code == 200: res = r.json().get('text')
+        elif api_name == "hf" and KEYS["hf"]:
+            API_URL = "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-72B-Instruct"
+            r = requests.post(API_URL, headers={"Authorization": f"Bearer {KEYS['hf']}"},
+                json={"inputs": f"User: {prompt}\nAssistant:", "parameters": {"max_new_tokens": 100}}, timeout=30)
+            if r.status_code == 200:
+                out = r.json()
+                res = out[0].get('generated_text', '').split("Assistant:")[-1] if isinstance(out, list) else out.get('generated_text', '')
+
+        duration = round(time.time() - start_time, 2)
+        if res:
+            log(f"✅ [{api_name.upper()}] Обработано {char_count} симв. за {duration}с")
+            return res.strip()
     except Exception as e:
         log(f"❌ [{api_name.upper()}] Ошибка: {str(e)[:50]}")
     return None
@@ -82,41 +103,94 @@ def process_item(item, api_name, is_ai):
     if is_ai:
         summary = call_ai(api_name, text) if len(text) > 100 else None
         content = summary if summary else item.get('title')
-        # Для AI: ссылка-стрелка, текст, затем эмодзи и тег с новой строки
         line = f"📌 <a href='{link}'>→</a> {content}\n{video_marker}🏷️ {source_tag}"
     else:
-        # Для YouTube/Direct: ссылка-заголовок
+        # Для YouTube (Direct) - заголовок это ссылка
         line = f"📌 <a href='{link}'>{item.get('title')}</a>\n{video_marker}🏷️ {source_tag}"
 
     return {"id": item.get('id'), "line": line}
 
+def api_worker(items_chunk, api_name, is_ai):
+    log(f"🧬 [{api_name.upper()}] Поток взял {len(items_chunk)} задач")
+    return [process_item(it, api_name, is_ai) for it in items_chunk]
+
 def send_tg(text, disable_preview):
-    # Очистка от мусорных тегов типа <plaintext>
+    # Фильтр HTML тегов для Telegram
     allowed = ['a', 'b', 'i', 'strong', 'em']
     soup = BeautifulSoup(text, "html.parser")
     for tag in soup.find_all(True):
-        if tag.name not in allowed: tag.unwrap()
+        if tag.name not in allowed:
+            tag.unwrap()
     
+    clean_text = str(soup)
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID, 
-        "text": str(soup), 
+        "text": clean_text, 
         "parse_mode": "HTML", 
         "disable_web_page_preview": disable_preview
     }
     res = requests.post(url, data=payload)
-    return res.status_code == 200
+    if res.status_code == 200:
+        log("📬 Сообщение отправлено")
+        return True
+    log(f"❌ Ошибка Telegram: {res.text}")
+    return False
+
+def mark_as_read(ids, headers, api_base):
+    for item_id in ids:
+        requests.post(f"{api_base}/edit-tag", headers=headers, data={'i': item_id, 'a': 'user/-/state/com.google/read'})
+    log(f"📖 {len(ids)} новостей помечены прочитанными")
 
 def process_category(cat_name, use_ai, headers, api_base):
     log(f"🚀 КАТЕГОРИЯ: {cat_name.upper()}")
-    # ... логика получения items и многопоточности ...
-    # (пропускаю для краткости, она идентична прошлой версии)
-    
-    # При отправке:
-    # disable_preview = True для AI категорий
-    # disable_preview = False для Direct (YouTube) категорий
+    r = requests.get(f"{api_base}/stream/contents/user/-/label/{cat_name}", 
+                    params={'n': 40, 'xt': 'user/-/state/com.google/read'}, headers=headers)
+    items = r.json().get('items', [])
+    if not items: return log("☕ Пусто.")
+
+    final_results = []
+    if use_ai:
+        active_apis = [a for a in ["gemini", "groq", "mistral", "cohere", "hf"] if (a == "gemini" or KEYS.get(a))]
+        n = len(active_apis)
+        chunks = [items[i::n] for i in range(n)]
+        with ThreadPoolExecutor(max_workers=n) as ex:
+            futures = [ex.submit(api_worker, chunks[i], active_apis[i], True) for i in range(len(chunks))]
+            for f in as_completed(futures): final_results.extend(f.result())
+    else:
+        final_results = [process_item(it, "direct", False) for it in items]
+
     if final_results:
-        msg = f"#{cat_name.replace(' ', '')}\n\n"
-        # ... цикл сборки сообщения ...
-        send_tg(msg, disable_preview=use_ai) 
+        cat_tag = f"#{cat_name.replace(' ', '')}"
+        msg = f"{cat_tag}\n\n"
+        items_to_mark = []
+
+        for entry in final_results:
+            line = entry['line'] + "\n\n"
+            if len(msg) + len(line) > 4000:
+                if send_tg(msg.strip(), disable_preview=use_ai):
+                    mark_as_read(items_to_mark, headers, api_base)
+                msg = f"{cat_tag}\n\n"
+                items_to_mark = []
+            
+            msg += line
+            items_to_mark.append(entry['id'])
+        
+        if items_to_mark and send_tg(msg.strip(), disable_preview=use_ai):
+            mark_as_read(items_to_mark, headers, api_base)
+
+def main():
+    log("🏁 ЗАПУСК")
+    auth_res = requests.get(f"{BASE_URL}/api/greader.php/accounts/ClientLogin?Email={USER}&Passwd={PASS}")
+    auth = re.search(r'Auth=(.*)', auth_res.text)
+    if not auth: return log("❌ Ошибка входа")
+    headers = {'Authorization': f'GoogleLogin auth={auth.group(1).strip()}'}
+    api_base = f"{BASE_URL}/api/greader.php/reader/api/0"
+    
+    for cat in CATEGORIES_AI: process_category(cat, True, headers, api_base)
+    for cat in CATEGORIES_DIRECT: process_category(cat, False, headers, api_base)
+    log("✅ ЗАВЕРШЕНО")
+
+if __name__ == "__main__": main()
+
  
