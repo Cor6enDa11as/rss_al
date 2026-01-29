@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 
 import requests
@@ -36,7 +35,8 @@ def clean_ai_text(text):
     return text.strip()
 
 def call_ai(api_name, text):
-    prompt = f"Сформулируй главную новость текста одним ёмким предложением на русском языке (30 слов). Передай конкретный результат или ключевое событие, избегая общих фраз. Запрещено: использовать Markdown (), писать количество слов в скобках и начинать с вводных оборотов вроде 'Статья рассказывает...','Автор пишет...'. Только чистый, плотный текст.Статья: {text[:3800]}"
+    # Тот самый универсальный промпт "Максимум смысла"
+    prompt = f"Сформулируй главную новость текста одним ёмким предложением на русском языке (строго до 30 слов). Передай конкретный результат или ключевое событие, избегая общих фраз. Запрещено: использовать Markdown (**), писать количество слов в скобках и начинать с вводных оборотов вроде 'Статья рассказывает...' или 'Автор пишет...'. Только чистый, плотный текст. Статья: {text[:3800]}"
     try:
         res = None
         if api_name == "groq" and KEYS["groq"]:
@@ -64,19 +64,22 @@ def call_ai(api_name, text):
     return None
 
 def extract_full_text(item):
-    """Улучшенное вытаскивание текста из RSS/FreshRSS API"""
-    # Ищем во всех возможных полях, где может лежать текст поста (актуально для Telegram RSS)
-    raw = (item.get('content', {}).get('content') or
-           item.get('summary', {}).get('content') or
-           item.get('summary') or
-           item.get('content') or "")
-
-    if not raw or len(raw) < 20: # Если в полях пусто, берем заголовок как крайний случай
-        raw = item.get('title', "")
+    """Улучшенное вытаскивание текста: ищем самый длинный контент (для Telegram)"""
+    candidates = [
+        item.get('content', {}).get('content'),
+        item.get('summary', {}).get('content'),
+        item.get('summary'),
+        item.get('content'),
+        item.get('description') # Добавили прямую проверку описания
+    ]
+    # Выбираем самый длинный текст из доступных полей
+    valid_texts = [str(c) for c in candidates if c and len(str(c)) > 0]
+    raw = max(valid_texts, key=len) if valid_texts else item.get('title', "")
 
     soup = BeautifulSoup(raw, "html.parser")
-    # Проверяем наличие видео/медиа
-    has_video = bool(soup.find(['video', 'iframe', 'embed', 'img'])) or ".mp4" in str(raw).lower()
+    # Видео-детектор: УБРАЛИ 'img', оставили только плееры и файлы
+    has_video = bool(soup.find(['video', 'iframe', 'embed'])) or ".mp4" in str(raw).lower()
+
     for s in soup(["script", "style"]): s.decompose()
     clean_text = " ".join(soup.get_text(separator=' ').split())
     return clean_text, has_video
@@ -89,7 +92,7 @@ def send_tg(text, disable_preview, show_above=False):
         "parse_mode": "HTML",
         "link_preview_options": {
             "is_disabled": disable_preview,
-            "show_above_text": show_above # Превью над текстом для YouTube
+            "show_above_text": show_above
         }
     }
     try:
@@ -102,19 +105,18 @@ def process_item(item, api_name, is_ai):
     link = item.get('alternate', [{}])[0].get('href', '')
     feed_title = item.get('origin', {}).get('title', 'Source')
 
-    # Извлекаем полный текст вместо простого заголовка
     full_text, has_v = extract_full_text(item)
-
     domain = urlparse(link).netloc.lower()
     is_yt = any(x in domain for x in ["youtube.com", "youtu.be"])
 
-    # Формируем тег источника
-    if is_yt or "t.me" in domain:
-        tag = feed_title.replace(" ", "").replace("#", "")
-    else:
-        tag = domain.replace("www.", "").split('.')[0].capitalize()
+    # --- НОВАЯ ЛОГИКА ХЭШТЕГОВ (Очистка и объединение) ---
+    # 1. Берем часть до первого дефиса или скобки
+    clean_name = re.split(r'[-—(]', feed_title)[0].strip()
+    # 2. Оставляем только буквы и цифры, убираем пробелы
+    clean_name = "".join(re.findall(r'[a-zA-Zа-яА-Я0-9]+', clean_name))
+    source_tag = f"#{clean_name}"
 
-    source_tag = f"#{tag}"
+    # Видео ставим только на реальное видео или YouTube
     video_marker = "🎬 " if (has_v or is_yt) else ""
 
     if is_ai:
@@ -122,16 +124,13 @@ def process_item(item, api_name, is_ai):
         content = summary if summary else item.get('title')
         line = f"📌 <a href='{link}'>→</a> {content} {video_marker}\n🏷️ {source_tag}"
     else:
-        # Прямая ссылка для YouTube/Direct
         line = f"📌 <a href='{link}'>{item.get('title')}</a>\n🏷️ {source_tag}"
 
     return {"id": item.get('id'), "line": line}
 
 def mark_read(api_base, headers, ids):
-    """Пакетная отметка прочитанным для предотвращения Connection Error"""
     if not ids: return
     try:
-        # Google Reader API поддерживает передачу нескольких 'i' в одном запросе
         data = [('i', i_id) for i_id in ids]
         data.append(('a', 'user/-/state/com.google/read'))
         requests.post(f"{api_base}/edit-tag", headers=headers, data=data, timeout=20)
