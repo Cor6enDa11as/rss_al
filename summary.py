@@ -17,6 +17,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 CATEGORIES_AI = [c.strip() for c in os.getenv("CATEGORIES_AI", "").split(",") if c.strip()]
 CATEGORIES_DIRECT = [c.strip() for c in os.getenv("CATEGORIES_DIRECT", "").split(",") if c.strip()]
 
+# Порядок сохранен как в твоем коде
 KEYS = {
     "groq": os.getenv("GROQ_API_KEY"),
     "mistral": os.getenv("MISTRAL_API_KEY"),
@@ -35,52 +36,75 @@ def clean_ai_text(text):
 def call_ai(api_name, text):
     prompt = f"Сформулируй главную новость текста одним ёмким предложением на русском языке (30 слов). Передай результат, избегая общих фраз. Запрещено: Markdown, скобки с числом слов, вводные фразы. Только чистый текст. Статья: {text[:3800]}"
     try:
+        log(f"🤖 [AI] Запрос к {api_name.upper()}...")
         res = None
         if api_name == "groq" and KEYS["groq"]:
             r = requests.post("https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {KEYS['groq']}"},
                 json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}]}, timeout=25)
             if r.status_code == 200: res = r.json()['choices'][0]['message']['content']
+            else: log(f"❌ [AI ERROR] Groq вернул {r.status_code}: {r.text[:200]}")
+            
         elif api_name == "mistral" and KEYS["mistral"]:
             r = requests.post("https://api.mistral.ai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {KEYS['mistral']}"},
                 json={"model": "mistral-small-latest", "messages": [{"role": "user", "content": prompt}]}, timeout=25)
             if r.status_code == 200: res = r.json()['choices'][0]['message']['content']
+            else: log(f"❌ [AI ERROR] Mistral вернул {r.status_code}: {r.text[:200]}")
+            
         elif api_name == "cohere" and KEYS["cohere"]:
             r = requests.post("https://api.cohere.ai/v1/chat", headers={"Authorization": f"Bearer {KEYS['cohere']}"},
                 json={"message": prompt, "model": "command-r-plus"}, timeout=25)
             if r.status_code == 200: res = r.json().get('text')
+            else: log(f"❌ [AI ERROR] Cohere вернул {r.status_code}: {r.text[:200]}")
+            
         if res:
-            log(f"📡 [{api_name.upper()}] Ответ получен")
+            log(f"✅ [AI] {api_name.upper()} успешно ответил")
             return clean_ai_text(res)
     except Exception as e:
-        log(f"❌ AI Ошибка: {str(e)[:50]}")
+        log(f"❌ [AI CRITICAL] {api_name.upper()}: {str(e)}")
     return None
 
 def scrape_full_text(url):
     try:
+        log(f"🌐 [SCRAPER] Попытка парсинга ссылки: {url}")
         r = requests.get(url, timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
-        if r.status_code != 200: return ""
+        if r.status_code != 200:
+            log(f"⚠️ [SCRAPER] Ошибка доступа ({r.status_code})")
+            return ""
         soup = BeautifulSoup(r.text, 'html.parser')
         for s in soup(["script", "style", "nav", "header", "footer"]): s.decompose()
         paragraphs = soup.find_all('p')
         text = " ".join([p.get_text() for p in paragraphs])
-        return text if len(text) > 100 else ""
-    except: return ""
+        if len(text) > 100:
+            log(f"✅ [SCRAPER] Успех! Извлечено {len(text)} симв.")
+            return text
+        log("⚠️ [SCRAPER] Текст слишком короткий")
+        return ""
+    except Exception as e:
+        log(f"❌ [SCRAPER ERROR] {str(e)}")
+        return ""
 
 def extract_content(item, is_tg, is_yt):
-    # ПРИОРИТЕТ ДЛЯ TG: сначала ищем в description, потом в content
     raw = ""
+    source_field = ""
+    # ПРИОРИТЕТ ДЛЯ TG: description
     if is_tg:
-        raw = item.get('description') or item.get('content', {}).get('content') or item.get('summary', {}).get('content')
+        if item.get('description'):
+            raw = item['description']
+            source_field = "description"
+        else:
+            raw = item.get('content', {}).get('content') or item.get('summary', {}).get('content')
+            source_field = "content/summary"
+        log(f"🔍 [PARSER-TG] Взято из поля: {source_field}")
     else:
         raw = item.get('content', {}).get('content') or item.get('summary', {}).get('content') or item.get('description')
+        source_field = "RSS content/summary"
 
     raw = raw or item.get('title', "")
     soup = BeautifulSoup(str(raw), "html.parser")
 
     if is_tg:
-        # Убираем ссылки и картинки в начале поста (обычно это мусор ленты)
         for junk in soup.find_all(['a', 'img'], limit=3):
             junk.decompose()
 
@@ -95,17 +119,16 @@ def extract_content(item, is_tg, is_yt):
         return clean_text, has_v, link
     else:
         web_text = scrape_full_text(link)
-        return (web_text if len(web_text) > len(clean_text) else clean_text), has_v, link
+        final_text = (web_text if len(web_text) > len(clean_text) else clean_text)
+        log(f"📄 [CONTENT] Итоговый объем текста: {len(final_text)} симв.")
+        return final_text, has_v, link
 
 def get_hashtag(feed_title, link, is_tg_yt):
     if is_tg_yt:
-        # Режем хвосты, не ломая дефисы внутри названий
         name = re.split(r'\s+[-—]\s*|\s+\(', feed_title)[0].strip()
     else:
         domain = urlparse(link).netloc.lower().replace('www.', '')
         name = domain.split('.')[0].capitalize()
-
-    # Сохраняем ёЁ и убираем всё лишнее
     clean = "".join(re.findall(r'[a-zA-Zа-яА-ЯёЁ0-9]+', name))
     return f"#{clean}"
 
@@ -115,6 +138,7 @@ def process_item(item, api_name, is_ai):
     domain = urlparse(link).netloc.lower()
     is_tg, is_yt = "t.me" in domain, any(x in domain for x in ["youtube.com", "youtu.be"])
 
+    log(f"📰 [PROCESS] Старт: {item.get('title', '...')[:50]}")
     full_text, has_v, link = extract_content(item, is_tg, is_yt)
     tag = get_hashtag(feed_title, link, (is_tg or is_yt))
     v_mark = "🎬 " if (has_v and not is_yt) else ""
@@ -122,7 +146,6 @@ def process_item(item, api_name, is_ai):
     if is_ai:
         summary = call_ai(api_name, full_text)
         content = summary if summary else item.get('title')
-        # Весь текст новости курсивом
         line = f"📌 <a href='{link}'>→</a> <i>{content}</i> {v_mark}\n🏷️ {tag}"
     else:
         line = f"📌 <a href='{link}'>{item.get('title')}</a>\n🏷️ {tag}"
@@ -142,6 +165,7 @@ def process_category(cat_name, use_ai, headers, api_base):
         r = requests.get(f"{api_base}/stream/contents/user/-/label/{cat_name}",
                         params={'n': 50, 'xt': 'user/-/state/com.google/read'}, headers=headers, timeout=20)
         items = r.json().get('items', [])
+        log(f"📥 Найдено новых новостей: {len(items)}")
     except: return
     if not items: return
     final_results = []
@@ -182,12 +206,14 @@ def main():
     try:
         auth_res = requests.get(f"{BASE_URL}/api/greader.php/accounts/ClientLogin?Email={USER}&Passwd={PASS}", timeout=20)
         auth = re.search(r'Auth=(.*)', auth_res.text)
-        if not auth: return
+        if not auth:
+            log("❌ Ошибка авторизации FreshRSS")
+            return
         headers = {'Authorization': f'GoogleLogin auth={auth.group(1).strip()}'}
         api_base = f"{BASE_URL}/api/greader.php/reader/api/0"
         for cat in CATEGORIES_AI: process_category(cat, True, headers, api_base)
         for cat in CATEGORIES_DIRECT: process_category(cat, False, headers, api_base)
         log("✅ ГОТОВО")
-    except Exception as e: log(f"❌ Ошибка: {e}")
+    except Exception as e: log(f"❌ Критическая ошибка: {e}")
 
 if __name__ == "__main__": main()
