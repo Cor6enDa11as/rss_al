@@ -60,7 +60,7 @@ def call_ai(api_name, text):
         elif api_name == "cohere" and KEYS["cohere"]:
             # ИСПРАВЛЕНО: актуальная бесплатная модель command-r
             r = requests.post("https://api.cohere.ai/v1/chat", headers={"Authorization": f"Bearer {KEYS['cohere']}"},
-                json={"message": prompt, "model": "command-r-plus"}, timeout=25)
+                json={"message": prompt, "model": "command-r-08-2024"}, timeout=25)
             if r.status_code == 200: res = r.json().get('text')
             else: log(f"❌ [AI ERROR] Cohere вернул {r.status_code}: {r.text[:200]}")
             
