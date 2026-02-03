@@ -34,6 +34,11 @@ def clean_ai_text(text):
     return text.strip()
 
 def call_ai(api_name, text):
+    # Защита: если текста почти нет, не мучаем ИИ
+    if not text or len(text) < 150:
+        log(f"⚠️ [AI-{api_name.upper()}] Текст слишком короткий для анализа")
+        return None
+
     prompt = f"Сформулируй суть текста одним ёмким предложением на русском языке (30 слов). Передай результат, избегая общих фраз. Запрещено: Markdown, скобки с числом слов, вводные фразы. Только чистый текст. Статья: {text[:3800]}"
     try:
         log(f"🤖 [AI] Запрос к {api_name.upper()}...")
@@ -53,8 +58,9 @@ def call_ai(api_name, text):
             else: log(f"❌ [AI ERROR] Mistral вернул {r.status_code}: {r.text[:200]}")
             
         elif api_name == "cohere" and KEYS["cohere"]:
+            # ИСПРАВЛЕНО: актуальная бесплатная модель command-r
             r = requests.post("https://api.cohere.ai/v1/chat", headers={"Authorization": f"Bearer {KEYS['cohere']}"},
-                json={"message": prompt, "model": "command-r-plus"}, timeout=25)
+                json={"message": prompt, "model": "command-r"}, timeout=25)
             if r.status_code == 200: res = r.json().get('text')
             else: log(f"❌ [AI ERROR] Cohere вернул {r.status_code}: {r.text[:200]}")
             
@@ -68,7 +74,15 @@ def call_ai(api_name, text):
 def scrape_full_text(url):
     try:
         log(f"🌐 [SCRAPER] Попытка парсинга ссылки: {url}")
-        r = requests.get(url, timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
+        # УСИЛЕНИЕ HEADERS: косим под реальный браузер для обхода 403
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3',
+            'Referer': 'https://www.google.com/',
+            'DNT': '1'
+        }
+        r = requests.get(url, timeout=15, headers=headers)
         if r.status_code != 200:
             log(f"⚠️ [SCRAPER] Ошибка доступа ({r.status_code})")
             return ""
@@ -145,7 +159,8 @@ def process_item(item, api_name, is_ai):
 
     if is_ai:
         summary = call_ai(api_name, full_text)
-        content = summary if summary else item.get('title')
+        # ПОДСТАНОВКА ЗАГОЛОВКА: если ИИ не ответил или текст не получен
+        content = summary if summary else item.get('title', 'Без заголовка')
         line = f"📌 <a href='{link}'>→</a> <i>{content}</i> {v_mark}\n🏷️ {tag}"
     else:
         line = f"📌 <a href='{link}'>{item.get('title')}</a>\n🏷️ {tag}"
