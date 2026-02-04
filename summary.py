@@ -17,11 +17,12 @@ CHAT_ID = os.getenv("CHAT_ID")
 CATEGORIES_AI = [c.strip() for c in os.getenv("CATEGORIES_AI", "").split(",") if c.strip()]
 CATEGORIES_DIRECT = [c.strip() for c in os.getenv("CATEGORIES_DIRECT", "").split(",") if c.strip()]
 
-# Порядок сохранен как в твоем коде
+# Порядок сохранен + добавлен Gemini
 KEYS = {
     "groq": os.getenv("GROQ_API_KEY"),
     "mistral": os.getenv("MISTRAL_API_KEY"),
-    "cohere": os.getenv("COHERE_API_KEY")
+    "cohere": os.getenv("COHERE_API_KEY"),
+    "gemini": os.getenv("GEMINI_API_KEY")
 }
 
 def log(message):
@@ -49,21 +50,27 @@ def call_ai(api_name, text):
                 json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}]}, timeout=25)
             if r.status_code == 200: res = r.json()['choices'][0]['message']['content']
             else: log(f"❌ [AI ERROR] Groq вернул {r.status_code}: {r.text[:200]}")
-            
+
         elif api_name == "mistral" and KEYS["mistral"]:
             r = requests.post("https://api.mistral.ai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {KEYS['mistral']}"},
                 json={"model": "mistral-small-latest", "messages": [{"role": "user", "content": prompt}]}, timeout=25)
             if r.status_code == 200: res = r.json()['choices'][0]['message']['content']
             else: log(f"❌ [AI ERROR] Mistral вернул {r.status_code}: {r.text[:200]}")
-            
+
         elif api_name == "cohere" and KEYS["cohere"]:
-            # ИСПРАВЛЕНО: актуальная бесплатная модель command-r
             r = requests.post("https://api.cohere.ai/v1/chat", headers={"Authorization": f"Bearer {KEYS['cohere']}"},
                 json={"message": prompt, "model": "command-r-08-2024"}, timeout=25)
             if r.status_code == 200: res = r.json().get('text')
             else: log(f"❌ [AI ERROR] Cohere вернул {r.status_code}: {r.text[:200]}")
-            
+
+        elif api_name == "gemini" and KEYS["gemini"]:
+            # Добавлен Gemini 2.0 Flash (актуальный на 2026 год)
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={KEYS['gemini']}"
+            r = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=25)
+            if r.status_code == 200: res = r.json()['candidates'][0]['content']['parts'][0]['text']
+            else: log(f"❌ [AI ERROR] Gemini вернул {r.status_code}: {r.text[:200]}")
+
         if res:
             log(f"✅ [AI] {api_name.upper()} успешно ответил")
             return clean_ai_text(res)
@@ -74,7 +81,6 @@ def call_ai(api_name, text):
 def scrape_full_text(url):
     try:
         log(f"🌐 [SCRAPER] Попытка парсинга ссылки: {url}")
-        # УСИЛЕНИЕ HEADERS: косим под реальный браузер для обхода 403
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -102,7 +108,6 @@ def scrape_full_text(url):
 def extract_content(item, is_tg, is_yt):
     raw = ""
     source_field = ""
-    # ПРИОРИТЕТ ДЛЯ TG: description
     if is_tg:
         if item.get('description'):
             raw = item['description']
@@ -159,7 +164,6 @@ def process_item(item, api_name, is_ai):
 
     if is_ai:
         summary = call_ai(api_name, full_text)
-        # ПОДСТАНОВКА ЗАГОЛОВКА: если ИИ не ответил или текст не получен
         content = summary if summary else item.get('title', 'Без заголовка')
         line = f"📌 <a href='{link}'>→</a> <i>{content}</i> {v_mark}\n🏷️ {tag}"
     else:
@@ -185,9 +189,10 @@ def process_category(cat_name, use_ai, headers, api_base):
     if not items: return
     final_results = []
     if use_ai:
-        active_apis = [a for a in ["groq", "mistral", "cohere"] if KEYS.get(a)]
+        # Gemini добавлен в список активных API
+        active_apis = [a for a in ["groq", "mistral", "cohere", "gemini"] if KEYS.get(a)]
         chunks = [items[i::len(active_apis)] for i in range(len(active_apis))]
-        with ThreadPoolExecutor(max_workers=3) as ex:
+        with ThreadPoolExecutor(max_workers=len(active_apis)) as ex:
             futures = [ex.submit(lambda c, a: [process_item(it, a, True) for it in c], chunks[i], active_apis[i])
                        for i in range(len(chunks)) if chunks[i]]
             for f in as_completed(futures): final_results.extend(f.result())
