@@ -65,6 +65,7 @@ def call_ai(api_name, text):
             else: log(f"❌ [AI ERROR] Cohere вернул {r.status_code}: {r.text[:200]}")
 
         elif api_name == "gemini" and KEYS["gemini"]:
+            time.sleep(2.0)
             # Добавлен Gemini 2.0 Flash (актуальный на 2026 год)
             url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-001:generateContent?key={KEYS['gemini']}"
             r = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=25)
