@@ -66,7 +66,7 @@ def call_ai(api_name, text):
 
         elif api_name == "gemini" and KEYS["gemini"]:
             # Добавлен Gemini 2.0 Flash (актуальный на 2026 год)
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={KEYS['gemini']}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-001:generateContent?key={KEYS['gemini']}"
             r = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=25)
             if r.status_code == 200: res = r.json()['candidates'][0]['content']['parts'][0]['text']
             else: log(f"❌ [AI ERROR] Gemini вернул {r.status_code}: {r.text[:200]}")
