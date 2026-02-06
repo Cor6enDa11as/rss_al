@@ -60,15 +60,15 @@ def call_ai(api_name, text):
 
         elif api_name == "cohere" and KEYS["cohere"]:
             r = requests.post("https://api.cohere.ai/v1/chat", headers={"Authorization": f"Bearer {KEYS['cohere']}"},
-                json={"message": prompt, "model": "command-r-08-2024"}, timeout=25)
+                json={"message": prompt, "model": "command-r-08-2024"}, timeout=60)
             if r.status_code == 200: res = r.json().get('text')
             else: log(f"❌ [AI ERROR] Cohere вернул {r.status_code}: {r.text[:200]}")
 
         elif api_name == "gemini" and KEYS["gemini"]:
-            time.sleep(20.0)
+            time.sleep(5.0)
             # Добавлен Gemini 2.0 Flash (актуальный на 2026 год)
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key={KEYS['gemini']}"
-            r = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=25)
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-lite-preview:generateContent?key={KEYS['gemini']}"
+            r = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=90)
             if r.status_code == 200: res = r.json()['candidates'][0]['content']['parts'][0]['text']
             else: log(f"❌ [AI ERROR] Gemini вернул {r.status_code}: {r.text[:200]}")
 
