@@ -17,12 +17,19 @@ CHAT_ID = os.getenv("CHAT_ID")
 CATEGORIES_AI = [c.strip() for c in os.getenv("CATEGORIES_AI", "").split(",") if c.strip()]
 CATEGORIES_DIRECT = [c.strip() for c in os.getenv("CATEGORIES_DIRECT", "").split(",") if c.strip()]
 
-# Порядок сохранен + добавлен Gemini
+# Список ключей Gemini для ротации
+GEMINI_KEYS = [k for k in [
+    os.getenv("GEMINI_API_KEY_1"),
+    os.getenv("GEMINI_API_KEY_2"),
+    os.getenv("GEMINI_API_KEY_3")
+] if k]
+
+# Порядок сохранен + поддержка системы ротации
 KEYS = {
     "groq": os.getenv("GROQ_API_KEY"),
     "mistral": os.getenv("MISTRAL_API_KEY"),
     "cohere": os.getenv("COHERE_API_KEY"),
-    "gemini": os.getenv("GEMINI_API_KEY")
+    "gemini": GEMINI_KEYS[0] if GEMINI_KEYS else None # Берем первый для инициализации списка API
 }
 
 def log(message):
@@ -35,15 +42,15 @@ def clean_ai_text(text):
     return text.strip()
 
 def call_ai(api_name, text):
-    # Защита: если текста почти нет, не мучаем ИИ
     if not text or len(text) < 150:
         log(f"⚠️ [AI-{api_name.upper()}] Текст слишком короткий для анализа")
         return None
 
-    prompt = f"Сформулируй суть текста одним ёмким предложением на русском языке (30 слов). Передай результат, избегая общих фраз. Запрещено: Markdown, скобки с числом слов, вводные фразы. Только чистый текст. Статья: {text[:3800]}"
+    prompt = f"Сформулируй суть текста 1-2 ёмкими предложениями на русском языке .Запрещено: Markdown, скобки с числом слов, вводные фразы. Только чистый текст. Статья: {text[:3800]}"
     try:
         log(f"🤖 [AI] Запрос к {api_name.upper()}...")
         res = None
+
         if api_name == "groq" and KEYS["groq"]:
             r = requests.post("https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {KEYS['groq']}"},
@@ -64,13 +71,25 @@ def call_ai(api_name, text):
             if r.status_code == 200: res = r.json().get('text')
             else: log(f"❌ [AI ERROR] Cohere вернул {r.status_code}: {r.text[:200]}")
 
-        elif api_name == "gemini" and KEYS["gemini"]:
-            time.sleep(10.0)
-            # Добавлен Gemini 2.0 Flash (актуальный на 2026 год)
-            url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash-lite:generateContent?key={KEYS['gemini']}"
-            r = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=60)
-            if r.status_code == 200: res = r.json()['candidates'][0]['content']['parts'][0]['text']
-            else: log(f"❌ [AI ERROR] Gemini вернул {r.status_code}: {r.text[:200]}")
+        elif api_name == "gemini" and GEMINI_KEYS:
+            # Логика ротации ключей при ошибке 429
+            for idx, key in enumerate(GEMINI_KEYS):
+                time.sleep(8.0) # Защитная пауза для Free Tier
+                url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash-lite:generateContent?key={key}"
+                try:
+                    r = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=60)
+                    if r.status_code == 200:
+                        res = r.json()['candidates'][0]['content']['parts'][0]['text']
+                        break # Успех, выходим из цикла ключей
+                    elif r.status_code == 429:
+                        log(f"⚠️ [AI-GEMINI] Ключ №{idx+1} исчерпан (429). Пробую следующий...")
+                        continue # Пробуем следующий ключ
+                    else:
+                        log(f"❌ [AI ERROR] Gemini ключ №{idx+1} вернул {r.status_code}")
+                        break # Другая ошибка, прекращаем цикл
+                except Exception as e:
+                    log(f"❌ [AI ERROR] Ошибка на ключе №{idx+1}: {str(e)}")
+                    continue
 
         if res:
             log(f"✅ [AI] {api_name.upper()} успешно ответил")
@@ -190,7 +209,6 @@ def process_category(cat_name, use_ai, headers, api_base):
     if not items: return
     final_results = []
     if use_ai:
-        # Gemini добавлен в список активных API
         active_apis = [a for a in ["groq", "mistral", "cohere", "gemini"] if KEYS.get(a)]
         chunks = [items[i::len(active_apis)] for i in range(len(active_apis))]
         with ThreadPoolExecutor(max_workers=len(active_apis)) as ex:
@@ -205,7 +223,7 @@ def process_category(cat_name, use_ai, headers, api_base):
     for entry in final_results:
         if not use_ai or entry.get('is_yt'):
             if requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                             json={"chat_id": CHAT_ID, "text": entry['line'], "parse_mode": "HTML",
+                            json={"chat_id": CHAT_ID, "text": entry['line'], "parse_mode": "HTML",
                                    "link_preview_options": {"show_above_text": True}}).status_code == 200:
                 mark_read(api_base, headers, [entry['id']])
             continue
