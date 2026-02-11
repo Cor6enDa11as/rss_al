@@ -141,7 +141,7 @@ def extract_content(item, is_tg, is_yt):
         source_field = "RSS content/summary"
 
     raw = raw or item.get('title', "")
-    soup = BeautifulSoup(str(raw), "html.parser")
+    soup = BeautifulSoup(str(raw), features="html.parser")
 
     if is_tg:
         for junk in soup.find_all(['a', 'img'], limit=3):
